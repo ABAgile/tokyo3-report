@@ -17,6 +17,11 @@ type TestStruct struct {
 	Joined time.Time
 }
 
+type testPtrStruct struct {
+	Name *string
+	Age  *int
+}
+
 func TestStructRows(t *testing.T) {
 	testCases := []struct {
 		name            string
@@ -47,6 +52,24 @@ func TestStructRows(t *testing.T) {
 			expectedHdrs:    nil,
 			expectedHdrsErr: sql.ErrNoRows,
 			expectedVals:    nil,
+		},
+		{
+			name: "With pointer fields",
+			input: func() []any {
+				name := "Alice"
+				age := 42
+				return []any{
+					testPtrStruct{Name: &name, Age: &age},
+					testPtrStruct{Name: nil, Age: nil},
+				}
+			}(),
+			expectedErr:     nil,
+			expectedHdrs:    []string{"Name", "Age"},
+			expectedHdrsErr: nil,
+			expectedVals: [][]any{
+				{"Alice", 42},
+				{"", ""},
+			},
 		},
 	}
 
@@ -143,4 +166,17 @@ func TestSqlxRows(t *testing.T) {
 			assert.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+func TestSqlxRows_NilDB(t *testing.T) {
+	r := NewSqlxRows("SELECT 1", nil)
+	assert.ErrorIs(t, r.Read(), sql.ErrNoRows)
+	assert.False(t, r.Next())
+	assert.ErrorIs(t, r.Err(), sql.ErrNoRows)
+	hdrs, err := r.Headers()
+	assert.Nil(t, hdrs)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+	vals, err := r.Values()
+	assert.Nil(t, vals)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
 }
