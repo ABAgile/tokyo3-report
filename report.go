@@ -219,6 +219,7 @@ func (r *excelReport) insertGroupBreaks(rowIdx int, fields, lastRow []any, heade
 					return rowIdx, err
 				}
 				rowIdx++
+				break
 			}
 		}
 	}
@@ -276,7 +277,10 @@ func (r *excelReport) applyColumnWidths(fieldWidths []int) error {
 
 func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 	for k, m := range r.meta.col {
-		colIdx := headerIndices[k]
+		colIdx, ok := headerIndices[k]
+		if !ok {
+			continue
+		}
 		col, err := excelize.ColumnNumberToName(colIdx + 1)
 		if err != nil {
 			return err

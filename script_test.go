@@ -36,6 +36,12 @@ func TestGenerateScript(t *testing.T) {
 		Value int
 	}
 
+	type TestMultiGroupStruct struct {
+		GroupA string
+		GroupB string
+		Value  int
+	}
+
 	type TestStruct struct {
 		Name   string
 		Age    int
@@ -68,6 +74,30 @@ func TestGenerateScript(t *testing.T) {
 				{"A", "2"},
 				nil,
 				{"B", "3"},
+			},
+		},
+		{
+			// Regression test: insertGroupBreaks must insert at most one blank
+			// row per data-row transition, even when several group fields differ
+			// at once (e.g. row 2 -> row 3 differs in both GroupA and GroupB).
+			name: "With Multi-field Grouping",
+			conf: &ReportConf{
+				OutputPath: "/tmp/test_multi_group.xlsx",
+				SheetName:  "TestSheet",
+				Script:     `groupFields = ["GroupA", "GroupB"]`,
+			},
+			rowReader: NewStructRows([]any{
+				TestMultiGroupStruct{GroupA: "A", GroupB: "X", Value: 1},
+				TestMultiGroupStruct{GroupA: "A", GroupB: "Y", Value: 2},
+				TestMultiGroupStruct{GroupA: "B", GroupB: "Z", Value: 3},
+			}),
+			expectedRows: [][]string{
+				{"Group A", "Group B", "Value"},
+				{"A", "X", "1"},
+				nil,
+				{"A", "Y", "2"},
+				nil,
+				{"B", "Z", "3"},
 			},
 		},
 		{
@@ -171,6 +201,26 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 				w, err := f.GetColWidth("TestSheet", "A")
 				assert.NoError(t, err)
 				assert.Equal(t, 30.0, w)
+			},
+		},
+		{
+			// Regression test: processColumnMeta must ignore col meta entries
+			// that reference a column name absent from the header row instead
+			// of falling back to index 0 and corrupting column A's width.
+			name: "Col meta with unknown column",
+			conf: &ReportConf{
+				OutputPath: "/tmp/test_col_meta_unknown.xlsx",
+				SheetName:  "TestSheet",
+				Script:     `col = {"DoesNotExist": {"width": 30}}`,
+			},
+			rowReader: NewStructRows([]any{
+				struct{ Name string }{"Alice"},
+			}),
+			expectedRows: [][]string{{"Name"}, {"Alice"}},
+			customValidation: func(t *testing.T, f *excelize.File) {
+				w, err := f.GetColWidth("TestSheet", "A")
+				assert.NoError(t, err)
+				assert.NotEqual(t, 30.0, w)
 			},
 		},
 		{
