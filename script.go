@@ -40,13 +40,21 @@ func (r *excelReport) runScript(script string) error {
 	return nil
 }
 
-func parseColGlobal(globals starlark.StringDict, meta *scriptMeta) {
-	val, ok := globals["col"]
+func getStarlarkDict(globals starlark.StringDict, key string) *starlark.Dict {
+	val, ok := globals[key]
 	if !ok {
-		return
+		return nil
 	}
 	dict, ok := val.(*starlark.Dict)
 	if !ok {
+		return nil
+	}
+	return dict
+}
+
+func parseColGlobal(globals starlark.StringDict, meta *scriptMeta) {
+	dict := getStarlarkDict(globals, "col")
+	if dict == nil {
 		return
 	}
 	for _, item := range dict.Items() {
@@ -84,12 +92,8 @@ func starlarkDictToMap(dict *starlark.Dict) map[string]any {
 }
 
 func parseStyleGlobal(globals starlark.StringDict, meta *scriptMeta) {
-	val, ok := globals["style"]
-	if !ok {
-		return
-	}
-	dict, ok := val.(*starlark.Dict)
-	if !ok {
+	dict := getStarlarkDict(globals, "style")
+	if dict == nil {
 		return
 	}
 	for _, item := range dict.Items() {
@@ -106,12 +110,8 @@ func parseStyleGlobal(globals starlark.StringDict, meta *scriptMeta) {
 }
 
 func parseWidthGlobal(globals starlark.StringDict, meta *scriptMeta) {
-	val, ok := globals["width"]
-	if !ok {
-		return
-	}
-	dict, ok := val.(*starlark.Dict)
-	if !ok {
+	dict := getStarlarkDict(globals, "width")
+	if dict == nil {
 		return
 	}
 	for _, item := range dict.Items() {
