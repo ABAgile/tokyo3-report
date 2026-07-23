@@ -34,8 +34,8 @@ func (r *StructRows) Headers() ([]string, error) {
 	if len(r.rows) == 0 {
 		return nil, sql.ErrNoRows
 	}
-	result := []string{}
 	t := reflect.TypeOf(r.rows[0])
+	result := make([]string, 0, t.NumField())
 	for field := range t.Fields() {
 		result = append(result, field.Name)
 	}
@@ -46,8 +46,8 @@ func (r *StructRows) Values() ([]any, error) {
 	if r.index < 0 || r.index >= len(r.rows) {
 		return nil, sql.ErrNoRows
 	}
-	result := []any{}
 	v := reflect.ValueOf(r.rows[r.index])
+	result := make([]any, 0, v.NumField())
 	for _, val := range v.Fields() {
 		if val.Kind() == reflect.Pointer {
 			if !val.IsNil() {
@@ -107,20 +107,18 @@ func (r *SqlxRows) Values() ([]any, error) {
 	if r.rows == nil {
 		return nil, sql.ErrNoRows
 	}
-	if vals, err := r.rows.SliceScan(); err != nil {
+	vals, err := r.rows.SliceScan()
+	if err != nil {
 		return nil, err
-	} else {
-		for i, val := range vals {
-			if val != nil {
-				if r.columnTypes[i].DatabaseTypeName() == "NUMERIC" {
-					if f, err := strconv.ParseFloat(val.(string), 64); err == nil {
-						vals[i] = f
-					}
-				}
+	}
+	for i, val := range vals {
+		if val != nil && r.columnTypes[i].DatabaseTypeName() == "NUMERIC" {
+			if f, err := strconv.ParseFloat(val.(string), 64); err == nil {
+				vals[i] = f
 			}
 		}
-		return vals, nil
 	}
+	return vals, nil
 }
 
 func (r *SqlxRows) Headers() ([]string, error) {
