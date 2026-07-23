@@ -177,6 +177,11 @@ func (r *excelReport) writeHeaderRow(rowReader RowsReader) (map[string]int, []in
 }
 
 func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[string]int, fieldWidths []int) error {
+	dateStyleID, err := r.excel.NewStyle(&excelize.Style{NumFmt: OpenXMLShortDateFmtDateId})
+	if err != nil {
+		return err
+	}
+
 	var lastRow []any
 	for i := 2; rowReader.Next(); i++ {
 		fields, err := rowReader.Values()
@@ -184,9 +189,9 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 			return err
 		}
 
-		for i, fn := range r.meta.parser {
-			if result, err := fn(fields[i]); err == nil {
-				fields[i] = result
+		for colIdx, fn := range r.meta.parser {
+			if result, err := fn(fields[colIdx]); err == nil {
+				fields[colIdx] = result
 			}
 		}
 
@@ -202,7 +207,7 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 			return err
 		}
 
-		if err := r.applyDateStyles(fields, i); err != nil {
+		if err := r.applyDateStyles(fields, i, dateStyleID); err != nil {
 			return err
 		}
 		trackFieldWidths(fields, fieldWidths)
@@ -228,11 +233,7 @@ func (r *excelReport) insertGroupBreaks(rowIdx int, fields, lastRow []any, heade
 
 // applyDateStyles sets the date number format on cells whose value is a time.Time,
 // preventing Excel from auto-converting them to MMM-YY on open.
-func (r *excelReport) applyDateStyles(fields []any, rowIdx int) error {
-	dateStyleID, err := r.excel.NewStyle(&excelize.Style{NumFmt: OpenXMLShortDateFmtDateId})
-	if err != nil {
-		return err
-	}
+func (r *excelReport) applyDateStyles(fields []any, rowIdx int, dateStyleID int) error {
 	for col, field := range fields {
 		if _, ok := field.(time.Time); !ok {
 			continue
@@ -326,7 +327,7 @@ func (r *excelReport) processStyleMeta() error {
 
 	for _, bucket := range []int{styleTargetCol, styleTargetRow, styleTargetCell} {
 		for target, styleJSON := range r.meta.style {
-			target = strings.TrimSpace(strings.ToUpper(target))
+			target = normalizeTarget(target)
 			if classify(target) != bucket {
 				continue
 			}
@@ -362,7 +363,7 @@ func (r *excelReport) applyStyleTarget(bucket int, target string, styleID int) e
 
 func (r *excelReport) processWidthMeta() error {
 	for target, width := range r.meta.width {
-		target = strings.TrimSpace(strings.ToUpper(target))
+		target = normalizeTarget(target)
 		if colRe.MatchString(target) {
 			from, to := colRange(target)
 			if err := r.excel.SetColWidth(r.sheetName, from, to, boundedCellWidth(width)); err != nil {
@@ -388,6 +389,10 @@ func calcCellWidth(str string) int {
 
 func boundedCellWidth(width float64) float64 {
 	return max(min(width, 100.0), 10.0)
+}
+
+func normalizeTarget(target string) string {
+	return strings.TrimSpace(strings.ToUpper(target))
 }
 
 // colRange splits a colon-separated column range (e.g. "A:C") into its two
