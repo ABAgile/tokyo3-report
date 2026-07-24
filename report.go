@@ -165,9 +165,7 @@ func (r *excelReport) writeHeaderRow(rowReader RowsReader) (map[string]int, []in
 			headers[i] = flect.Titleize(hdr)
 		}
 		headerIndices[hdr] = i
-		if w := calcCellWidth(headers[i]); w > fieldWidths[i] {
-			fieldWidths[i] = w
-		}
+		fieldWidths[i] = calcCellWidth(headers[i])
 	}
 
 	if err := r.excel.SetSheetRow(r.sheetName, "A1", &headers); err != nil {
@@ -217,15 +215,13 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 
 func (r *excelReport) insertGroupBreaks(rowIdx int, fields, lastRow []any, headerIndices map[string]int) (int, error) {
 	for _, field := range r.meta.groupFields {
-		if colIdx, ok := headerIndices[field]; ok {
-			if fields[colIdx] != lastRow[colIdx] {
-				cell := fmt.Sprintf("A%d", rowIdx)
-				if err := r.excel.SetSheetRow(r.sheetName, cell, &[]any{}); err != nil {
-					return rowIdx, err
-				}
-				rowIdx++
-				break
+		if colIdx, ok := headerIndices[field]; ok && fields[colIdx] != lastRow[colIdx] {
+			cell := fmt.Sprintf("A%d", rowIdx)
+			if err := r.excel.SetSheetRow(r.sheetName, cell, &[]any{}); err != nil {
+				return rowIdx, err
 			}
+			rowIdx++
+			break
 		}
 	}
 	return rowIdx, nil
@@ -286,25 +282,19 @@ func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 		if err != nil {
 			return err
 		}
-		if width, ok := m["width"]; ok {
-			if val, ok := width.(float64); ok {
-				r.meta.width[col] = val
-			}
+		if width, ok := m["width"].(float64); ok {
+			r.meta.width[col] = width
 		}
-		if styleString, ok := m["style"]; ok {
-			if styleJSON, ok := styleString.(string); ok {
-				r.meta.style[col] = styleJSON
-			}
+		if styleJSON, ok := m["style"].(string); ok {
+			r.meta.style[col] = styleJSON
 		}
-		if lookup, ok := m["lookup"]; ok {
-			if key, ok := lookup.(string); ok {
-				t := r.translator
-				r.meta.parser[colIdx] = func(arg any) (any, error) {
-					if t == nil {
-						return arg, nil
-					}
-					return t.Label(key, arg), nil
+		if key, ok := m["lookup"].(string); ok {
+			t := r.translator
+			r.meta.parser[colIdx] = func(arg any) (any, error) {
+				if t == nil {
+					return arg, nil
 				}
+				return t.Label(key, arg), nil
 			}
 		}
 	}

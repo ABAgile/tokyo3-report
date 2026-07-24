@@ -17,11 +17,10 @@ type scriptMeta struct {
 
 func (r *excelReport) runScript(script string) error {
 	meta := scriptMeta{
-		col:         make(map[string]map[string]any),
-		parser:      make(map[int]parserFn),
-		style:       make(map[string]string),
-		width:       make(map[string]float64),
-		groupFields: []string{},
+		col:    make(map[string]map[string]any),
+		parser: make(map[int]parserFn),
+		style:  make(map[string]string),
+		width:  make(map[string]float64),
 	}
 
 	if script != "" {
@@ -41,14 +40,7 @@ func (r *excelReport) runScript(script string) error {
 }
 
 func getStarlarkDict(globals starlark.StringDict, key string) *starlark.Dict {
-	val, ok := globals[key]
-	if !ok {
-		return nil
-	}
-	dict, ok := val.(*starlark.Dict)
-	if !ok {
-		return nil
-	}
+	dict, _ := globals[key].(*starlark.Dict)
 	return dict
 }
 
