@@ -297,13 +297,12 @@ func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 			r.meta.style[col] = styleJSON
 		}
 		parserName, hasParser := m["parser"].(string)
-		parser, parserFound := r.parsers[parserName]
-		if hasParser && (!parserFound || parser == nil) {
+		parser := r.parsers[parserName]
+		if hasParser && parser == nil {
 			return fmt.Errorf("parser %q for column %q is not registered", parserName, k)
 		}
 		lookupKey, hasLookup := m["lookup"].(string)
 		if hasParser || hasLookup {
-			t := r.translator
 			r.meta.parser[colIdx] = func(arg any) (any, error) {
 				if hasParser {
 					parsed, err := parser(arg)
@@ -312,8 +311,8 @@ func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 					}
 					arg = parsed
 				}
-				if hasLookup && t != nil {
-					arg = t.Lookup(lookupKey, arg)
+				if hasLookup && r.translator != nil {
+					arg = r.translator.Lookup(lookupKey, arg)
 				}
 				return arg, nil
 			}

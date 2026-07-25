@@ -22,8 +22,7 @@ func (r *excelReport) runScript(script string) error {
 	}
 
 	if script != "" {
-		thread := &starlark.Thread{}
-		globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, "script.star", script, nil)
+		globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, &starlark.Thread{}, "script.star", script, nil)
 		if err != nil {
 			return err
 		}
