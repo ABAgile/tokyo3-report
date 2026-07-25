@@ -5,11 +5,9 @@ import (
 	"go.starlark.net/syntax"
 )
 
-type parserFn func(any) (any, error)
-
 type scriptMeta struct {
 	col         map[string]map[string]any
-	parser      map[int]parserFn
+	parser      map[int]Parser
 	style       map[string]string
 	width       map[string]float64
 	groupFields []string
@@ -18,7 +16,7 @@ type scriptMeta struct {
 func (r *excelReport) runScript(script string) error {
 	meta := scriptMeta{
 		col:    make(map[string]map[string]any),
-		parser: make(map[int]parserFn),
+		parser: make(map[int]Parser),
 		style:  make(map[string]string),
 		width:  make(map[string]float64),
 	}

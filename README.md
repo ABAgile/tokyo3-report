@@ -23,6 +23,7 @@ ReportConf ──► Generate(conf, rowReader) ──► .xlsx file
                     │
                     ├── RowsReader   (data source: StructRows or SqlxRows)
                     ├── Script       (optional Starlark, controls layout & style)
+                    ├── Parsers      (optional named field-value parsers)
                     └── Translator   (optional, localises headers and enum values)
 ```
 
@@ -68,6 +69,7 @@ See the [`example/`](example/) directory for a complete runnable program.
 | `SheetName`  | `string`     | Name of the worksheet to write. |
 | `Script`     | `string`     | Starlark script for layout customisation (see below). |
 | `Translator` | `Translator` | Optional interface for header and value localisation. |
+| `Parsers`    | `map[string]Parser` | Optional named parsers referenced by column metadata. |
 | `QueryPath`  | `string`     | Informational — callers may store the SQL file path here; the library does not read it. |
 
 ---
@@ -150,6 +152,31 @@ When no `Translator` is set, headers are produced by `flect.Titleize` (`order_id
 
 ---
 
+## Parsers
+
+A `Parser` converts a raw field value before it is written to Excel:
+
+```go
+type Parser func(any) (any, error)
+```
+
+Register parsers by name in `ReportConf`, then reference those names from the
+script's `col` metadata:
+
+```go
+conf.Parsers = map[string]report.Parser{
+    "trim": func(value any) (any, error) {
+        return strings.TrimSpace(value.(string)), nil
+    },
+}
+```
+
+An unknown parser name or a parser error stops report generation. When a column
+specifies both `parser` and `lookup`, the parser runs first and the lookup
+receives the parsed value.
+
+---
+
 ## Starlark script
 
 The `Script` field accepts a [Starlark](https://github.com/google/starlark-go) program. Starlark is a deterministic, sandboxed Python dialect — no I/O, no imports, no side-effects outside the declared variables below.
@@ -205,12 +232,12 @@ Per-column settings keyed by the **raw** field/column name (before any `Translat
 ```python
 col = {
     "amount": {
-        "width":  18,
-        "style":  '{"num_fmt":4}',       # #,##0.00
-        "lookup": "payment_status",      # calls Translator.Label("payment_status", value)
+        "width": 18,
+        "style": '{"num_fmt":4}',        # #,##0.00
     },
     "status": {
-        "lookup": "order_status",
+        "parser": "normalize_status",    # resolves ReportConf.Parsers entry
+        "lookup": "order_status",        # receives the parsed value
     },
 }
 ```
@@ -219,7 +246,8 @@ col = {
 |----------|--------|-------------|
 | `width`  | number | Column width (same semantics as `width` dict above). |
 | `style`  | string | JSON style applied to the entire column. |
-| `lookup` | string | Passes each cell value through `Translator.Label(key, value)`. No-op when no `Translator` is set. |
+| `parser` | string | Runs the named `ReportConf.Parsers` entry. Unknown names and parser errors stop generation. |
+| `lookup` | string | Passes the parsed (or raw) value through `Translator.Label(key, value)`. No-op when no `Translator` is set. |
 
 `col` style and width entries are merged into the `style` and `width` dicts after the script runs, so they can coexist with direct `style`/`width` entries.
 

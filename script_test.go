@@ -1,7 +1,11 @@
 package report
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,6 +228,21 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			},
 		},
 		{
+			name: "With parser",
+			conf: &ReportConf{
+				OutputPath: "/tmp/test_parser.xlsx",
+				SheetName:  "TestSheet",
+				Script:     `col = {"Name": {"parser": "uppercase"}}`,
+				Parsers: map[string]Parser{
+					"uppercase": func(value any) (any, error) {
+						return strings.ToUpper(value.(string)), nil
+					},
+				},
+			},
+			rowReader:    NewStructRows([]any{struct{ Name string }{"Alice"}}),
+			expectedRows: [][]string{{"Name"}, {"ALICE"}},
+		},
+		{
 			name: "With lookup",
 			conf: &ReportConf{
 				OutputPath: "/tmp/test_lookup.xlsx",
@@ -241,6 +260,22 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 				{"Name", "Status"},
 				{"Alice", "Active"},
 			},
+		},
+		{
+			name: "Parser before lookup",
+			conf: &ReportConf{
+				OutputPath: "/tmp/test_parser_lookup.xlsx",
+				SheetName:  "TestSheet",
+				Script:     `col = {"Status": {"parser": "status_code", "lookup": "status"}}`,
+				Translator: lookupTranslator{},
+				Parsers: map[string]Parser{
+					"status_code": func(value any) (any, error) {
+						return strconv.Atoi(strings.TrimSpace(value.(string)))
+					},
+				},
+			},
+			rowReader:    NewStructRows([]any{struct{ Status string }{" 1 "}}),
+			expectedRows: [][]string{{"Status"}, {"Active"}},
 		},
 	}
 
@@ -266,4 +301,29 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			os.Remove(tc.conf.OutputPath)
 		})
 	}
+}
+
+func TestGenerateScriptUnknownParser(t *testing.T) {
+	conf := &ReportConf{
+		OutputPath: filepath.Join(t.TempDir(), "unknown-parser.xlsx"),
+		SheetName:  "TestSheet",
+		Script:     `col = {"Name": {"parser": "missing"}}`,
+	}
+
+	err := Generate(conf, NewStructRows([]any{struct{ Name string }{"Alice"}}))
+	assert.EqualError(t, err, `parser "missing" for column "Name" is not registered`)
+}
+
+func TestGenerateScriptParserError(t *testing.T) {
+	conf := &ReportConf{
+		OutputPath: filepath.Join(t.TempDir(), "parser-error.xlsx"),
+		SheetName:  "TestSheet",
+		Script:     `col = {"Name": {"parser": "fail"}}`,
+		Parsers: map[string]Parser{
+			"fail": func(any) (any, error) { return nil, errors.New("invalid value") },
+		},
+	}
+
+	err := Generate(conf, NewStructRows([]any{struct{ Name string }{"Alice"}}))
+	assert.EqualError(t, err, `row 2: parse column "Name" with "fail": invalid value`)
 }

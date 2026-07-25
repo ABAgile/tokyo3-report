@@ -35,11 +35,15 @@ type Translator interface {
 	Label(key string, code any) string
 }
 
+// Parser converts a raw field value before any configured lookup is applied.
+type Parser func(any) (any, error)
+
 type ReportConf struct {
 	OutputPath,
 	Script,
 	SheetName string
 	Translator Translator
+	Parsers    map[string]Parser
 }
 
 type excelReport struct {
@@ -51,6 +55,7 @@ type excelReport struct {
 
 	meta       *scriptMeta
 	translator Translator
+	parsers    map[string]Parser
 }
 
 func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
@@ -58,6 +63,7 @@ func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
 		filePath:   conf.OutputPath,
 		sheetName:  conf.SheetName,
 		translator: conf.Translator,
+		parsers:    conf.Parsers,
 	}
 
 	if err = report.openWorkbook(); err != nil {
@@ -188,9 +194,11 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 		}
 
 		for colIdx, fn := range r.meta.parser {
-			if result, err := fn(fields[colIdx]); err == nil {
-				fields[colIdx] = result
+			result, err := fn(fields[colIdx])
+			if err != nil {
+				return fmt.Errorf("row %d: %w", i, err)
 			}
+			fields[colIdx] = result
 		}
 
 		if lastRow != nil {
@@ -288,13 +296,26 @@ func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 		if styleJSON, ok := m["style"].(string); ok {
 			r.meta.style[col] = styleJSON
 		}
-		if key, ok := m["lookup"].(string); ok {
+		parserName, hasParser := m["parser"].(string)
+		parser, parserFound := r.parsers[parserName]
+		if hasParser && (!parserFound || parser == nil) {
+			return fmt.Errorf("parser %q for column %q is not registered", parserName, k)
+		}
+		lookupKey, hasLookup := m["lookup"].(string)
+		if hasParser || hasLookup {
 			t := r.translator
 			r.meta.parser[colIdx] = func(arg any) (any, error) {
-				if t == nil {
-					return arg, nil
+				if hasParser {
+					parsed, err := parser(arg)
+					if err != nil {
+						return nil, fmt.Errorf("parse column %q with %q: %w", k, parserName, err)
+					}
+					arg = parsed
 				}
-				return t.Label(key, arg), nil
+				if hasLookup && t != nil {
+					arg = t.Label(lookupKey, arg)
+				}
+				return arg, nil
 			}
 		}
 	}
