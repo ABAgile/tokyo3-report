@@ -31,8 +31,8 @@ var colRe = regexp.MustCompile(`^[A-Z]+(:[A-Z]+)?$`)
 // Translator supplies display strings for header names and enum-mapped values.
 // A nil Translator is valid; headers fall back to flect.Titleize and values pass through unchanged.
 type Translator interface {
-	T(key string) string
-	Label(key string, code any) string
+	Header(key string) string
+	Lookup(key string, code any) string
 }
 
 // Parser converts a raw field value before any configured lookup is applied.
@@ -166,7 +166,7 @@ func (r *excelReport) writeHeaderRow(rowReader RowsReader) (map[string]int, []in
 	fieldWidths := make([]int, len(headers))
 	for i, hdr := range headers {
 		if r.translator != nil {
-			headers[i] = r.translator.T(hdr)
+			headers[i] = r.translator.Header(hdr)
 		} else {
 			headers[i] = flect.Titleize(hdr)
 		}
@@ -313,7 +313,7 @@ func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 					arg = parsed
 				}
 				if hasLookup && t != nil {
-					arg = t.Label(lookupKey, arg)
+					arg = t.Lookup(lookupKey, arg)
 				}
 				return arg, nil
 			}

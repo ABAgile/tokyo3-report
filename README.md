@@ -121,18 +121,18 @@ Implement `Translator` to localise header names and enum-coded values.
 
 ```go
 type Translator interface {
-    T(key string) string                 // header: raw field/column name → display name
-    Label(key string, code any) string   // value:  lookup key + raw code  → display label
+    Header(key string) string              // raw field/column name → display header
+    Lookup(key string, code any) string    // lookup key + raw code → display value
 }
 ```
 
-`T` is called once per header with the raw field or SQL column name.
-`Label` is called per cell for columns that set `lookup` in the script (see below).
+`Header` is called once per header with the raw field or SQL column name.
+`Lookup` is called per cell for columns that set `lookup` in the script (see below).
 
 ```go
 type MyTranslator struct{}
 
-func (MyTranslator) T(key string) string {
+func (MyTranslator) Header(key string) string {
     return map[string]string{
         "region":  "Region",
         "product": "Product Name",
@@ -140,7 +140,7 @@ func (MyTranslator) T(key string) string {
     }[key]
 }
 
-func (MyTranslator) Label(key string, code any) string {
+func (MyTranslator) Lookup(key string, code any) string {
     if key == "status" {
         return map[any]string{1: "Active", 2: "Closed"}[code]
     }
@@ -227,7 +227,7 @@ Each key selects a target; each value is the JSON serialisation of an [excelize 
 
 ### `col`
 
-Per-column settings keyed by the **raw** field/column name (before any `Translator.T` rename).
+Per-column settings keyed by the **raw** field/column name (before any `Translator.Header` rename).
 
 ```python
 col = {
@@ -247,7 +247,7 @@ col = {
 | `width`  | number | Column width (same semantics as `width` dict above). |
 | `style`  | string | JSON style applied to the entire column. |
 | `parser` | string | Runs the named `ReportConf.Parsers` entry. Unknown names and parser errors stop generation. |
-| `lookup` | string | Passes the parsed (or raw) value through `Translator.Label(key, value)`. No-op when no `Translator` is set. |
+| `lookup` | string | Passes the parsed (or raw) value through `Translator.Lookup(key, value)`. No-op when no `Translator` is set. |
 
 `col` style and width entries are merged into the `style` and `width` dicts after the script runs, so they can coexist with direct `style`/`width` entries.
 

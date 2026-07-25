@@ -15,8 +15,8 @@ import (
 
 type lookupTranslator struct{}
 
-func (lookupTranslator) T(key string) string { return key }
-func (lookupTranslator) Label(_ string, code any) string {
+func (lookupTranslator) Header(key string) string { return key }
+func (lookupTranslator) Lookup(_ string, code any) string {
 	switch code {
 	case 1:
 		return "Active"

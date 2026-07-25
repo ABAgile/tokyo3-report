@@ -10,13 +10,13 @@ import (
 
 type simpleTranslator struct{}
 
-func (simpleTranslator) T(key string) string {
+func (simpleTranslator) Header(key string) string {
 	if key == "Name" {
 		return "Full Name"
 	}
 	return key
 }
-func (simpleTranslator) Label(_ string, code any) string { return "" }
+func (simpleTranslator) Lookup(_ string, code any) string { return "" }
 
 func TestGenerate(t *testing.T) {
 	testCases := []struct {

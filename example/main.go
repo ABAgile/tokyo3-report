@@ -20,7 +20,7 @@ type SalesRecord struct {
 // salesTranslator localises headers and enum values.
 type salesTranslator struct{}
 
-func (salesTranslator) T(key string) string {
+func (salesTranslator) Header(key string) string {
 	headers := map[string]string{
 		"Region":   "Region",
 		"Product":  "Product",
@@ -34,7 +34,7 @@ func (salesTranslator) T(key string) string {
 	return key
 }
 
-func (salesTranslator) Label(key string, code any) string {
+func (salesTranslator) Lookup(key string, code any) string {
 	return fmt.Sprintf("%v", code)
 }
 
