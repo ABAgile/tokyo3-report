@@ -48,8 +48,9 @@ type ReportConf struct {
 }
 
 type excelReport struct {
-	isNew bool
-	excel *excelize.File
+	isNew  bool
+	excel  *excelize.File
+	stream *excelize.StreamWriter
 
 	filePath,
 	sheetName string
@@ -70,7 +71,12 @@ func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
 	if err = report.openWorkbook(); err != nil {
 		return
 	}
+	var fieldWidths []int
+	var stagedPath string
 	defer func() {
+		if stagedPath != "" {
+			os.Remove(stagedPath)
+		}
 		if closeErr := report.excel.Close(); err == nil {
 			err = closeErr
 		}
@@ -84,7 +90,13 @@ func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
 		return
 	}
 	if rowReader != nil {
-		if err = report.populateSheet(rowReader); err != nil {
+		if fieldWidths, err = report.populateSheet(rowReader); err != nil {
+			return
+		}
+		if stagedPath, err = report.stageWorkbook(); err != nil {
+			return
+		}
+		if err = report.applyColumnWidths(fieldWidths); err != nil {
 			return
 		}
 	}
@@ -119,14 +131,14 @@ func (r *excelReport) openWorkbook() error {
 	return nil
 }
 
-// saveWorkbook writes beside the target and renames the completed file into
-// place, so a failed write cannot truncate or corrupt the existing workbook.
-func (r *excelReport) saveWorkbook() (err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(r.filePath), "."+filepath.Base(r.filePath)+".tmp-*")
+// writeWorkbookTemp writes the workbook to a sibling temporary file and
+// returns its path without changing the output path.
+func (r *excelReport) writeWorkbookTemp() (tmpPath string, err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(r.filePath), "."+filepath.Base(r.filePath)+".tmp-*.xlsx")
 	if err != nil {
-		return err
+		return "", err
 	}
-	tmpPath := tmp.Name()
+	tmpPath = tmp.Name()
 	defer func() {
 		if err != nil {
 			tmp.Close()
@@ -135,18 +147,54 @@ func (r *excelReport) saveWorkbook() (err error) {
 	}()
 
 	// Write uses Path to determine the workbook content type. The temporary
-	// filename intentionally has a .tmp suffix, so retain the requested path.
+	// filename is only a staging path, so retain the requested output path.
 	r.excel.Path = r.filePath
 	if err = r.excel.Write(tmp); err != nil {
-		return err
+		return "", err
 	}
 	if err = tmp.Sync(); err != nil {
-		return err
+		return "", err
 	}
 	if err = tmp.Close(); err != nil {
+		return "", err
+	}
+	return tmpPath, nil
+}
+
+// stageWorkbook flushes the streamed worksheet, materializes it, and reopens
+// it so normal-mode style and width operations can safely be applied.
+func (r *excelReport) stageWorkbook() (stagePath string, err error) {
+	stagePath, err = r.writeWorkbookTemp()
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			os.Remove(stagePath)
+		}
+	}()
+
+	if err = r.excel.Close(); err != nil {
+		return "", err
+	}
+	excel, err := excelize.OpenFile(stagePath)
+	if err != nil {
+		return "", err
+	}
+	r.excel = excel
+	return stagePath, nil
+}
+
+// saveWorkbook atomically replaces the output with a completed workbook.
+func (r *excelReport) saveWorkbook() (err error) {
+	tmpPath, err := r.writeWorkbookTemp()
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, r.filePath)
+	if err = os.Rename(tmpPath, r.filePath); err != nil {
+		os.Remove(tmpPath)
+	}
+	return err
 }
 
 func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
@@ -172,49 +220,61 @@ func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
 	return r.excel.SetSheetName(sheetName, r.sheetName)
 }
 
-func (r *excelReport) populateSheet(rowReader RowsReader) error {
+func (r *excelReport) populateSheet(rowReader RowsReader) ([]int, error) {
 	if err := rowReader.Read(); err != nil {
-		return err
+		return nil, err
 	}
 	if rowReader.Err() == sql.ErrNoRows {
-		return nil
+		return nil, nil
 	}
 
-	headerIndices, fieldWidths, err := r.writeHeaderRow(rowReader)
+	headers, headerIndices, fieldWidths, err := r.prepareHeaders(rowReader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := r.processColumnMeta(headerIndices); err != nil {
-		return err
+		return nil, err
+	}
+
+	r.stream, err = r.excel.NewStreamWriter(r.sheetName)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.stream.SetRow("A1", headers); err != nil {
+		return nil, err
 	}
 	if err := r.writeDataRows(rowReader, headerIndices, fieldWidths); err != nil {
-		return err
+		return nil, err
 	}
-	return r.applyColumnWidths(fieldWidths)
+	if err := rowReader.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.stream.Flush(); err != nil {
+		return nil, err
+	}
+	r.stream = nil
+	return fieldWidths, nil
 }
 
-func (r *excelReport) writeHeaderRow(rowReader RowsReader) (map[string]int, []int, error) {
-	headers, err := rowReader.Headers()
+func (r *excelReport) prepareHeaders(rowReader RowsReader) ([]any, map[string]int, []int, error) {
+	rawHeaders, err := rowReader.Headers()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	headerIndices := make(map[string]int)
-	fieldWidths := make([]int, len(headers))
-	for i, hdr := range headers {
+	headers := make([]any, len(rawHeaders))
+	headerIndices := make(map[string]int, len(rawHeaders))
+	fieldWidths := make([]int, len(rawHeaders))
+	for i, hdr := range rawHeaders {
 		if r.translator != nil {
 			headers[i] = r.translator.Header(hdr)
 		} else {
 			headers[i] = flect.Titleize(hdr)
 		}
 		headerIndices[hdr] = i
-		fieldWidths[i] = calcCellWidth(headers[i])
+		fieldWidths[i] = calcCellWidth(fmt.Sprint(headers[i]))
 	}
-
-	if err := r.excel.SetSheetRow(r.sheetName, "A1", &headers); err != nil {
-		return nil, nil, err
-	}
-	return headerIndices, fieldWidths, nil
+	return headers, headerIndices, fieldWidths, nil
 }
 
 func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[string]int, fieldWidths []int) error {
@@ -224,7 +284,8 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 	}
 
 	var lastRow []any
-	for i := 2; rowReader.Next(); i++ {
+	rowIdx := 2
+	for rowReader.Next() {
 		fields, err := rowReader.Values()
 		if err != nil {
 			return err
@@ -233,27 +294,31 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 		for colIdx, fn := range r.meta.parser {
 			result, err := fn(fields[colIdx])
 			if err != nil {
-				return fmt.Errorf("row %d: %w", i, err)
+				return fmt.Errorf("row %d: %w", rowIdx, err)
 			}
 			fields[colIdx] = result
 		}
 
 		if lastRow != nil {
-			if i, err = r.insertGroupBreaks(i, fields, lastRow, headerIndices); err != nil {
+			if rowIdx, err = r.insertGroupBreaks(rowIdx, fields, lastRow, headerIndices); err != nil {
 				return err
 			}
 		}
-		lastRow = fields
 
-		cell := fmt.Sprintf("A%d", i)
-		if err := r.excel.SetSheetRow(r.sheetName, cell, &fields); err != nil {
-			return err
+		values := make([]any, len(fields))
+		for col, field := range fields {
+			if _, ok := field.(time.Time); ok {
+				values[col] = excelize.Cell{StyleID: dateStyleID, Value: field}
+			} else {
+				values[col] = field
+			}
 		}
-
-		if err := r.applyDateStyles(fields, i, dateStyleID); err != nil {
+		if err := r.stream.SetRow(fmt.Sprintf("A%d", rowIdx), values); err != nil {
 			return err
 		}
 		trackFieldWidths(fields, fieldWidths)
+		lastRow = fields
+		rowIdx++
 	}
 	return nil
 }
@@ -261,33 +326,13 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 func (r *excelReport) insertGroupBreaks(rowIdx int, fields, lastRow []any, headerIndices map[string]int) (int, error) {
 	for _, field := range r.meta.groupFields {
 		if colIdx, ok := headerIndices[field]; ok && fields[colIdx] != lastRow[colIdx] {
-			cell := fmt.Sprintf("A%d", rowIdx)
-			if err := r.excel.SetSheetRow(r.sheetName, cell, &[]any{}); err != nil {
+			if err := r.stream.SetRow(fmt.Sprintf("A%d", rowIdx), []any{}); err != nil {
 				return rowIdx, err
 			}
-			rowIdx++
-			break
+			return rowIdx + 1, nil
 		}
 	}
 	return rowIdx, nil
-}
-
-// applyDateStyles sets the date number format on cells whose value is a time.Time,
-// preventing Excel from auto-converting them to MMM-YY on open.
-func (r *excelReport) applyDateStyles(fields []any, rowIdx int, dateStyleID int) error {
-	for col, field := range fields {
-		if _, ok := field.(time.Time); !ok {
-			continue
-		}
-		cellName, err := excelize.CoordinatesToCellName(col+1, rowIdx)
-		if err != nil {
-			return err
-		}
-		if err := r.excel.SetCellStyle(r.sheetName, cellName, cellName, dateStyleID); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func trackFieldWidths(fields []any, fieldWidths []int) {

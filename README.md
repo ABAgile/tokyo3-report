@@ -27,7 +27,7 @@ ReportConf ──► Generate(conf, rowReader) ──► .xlsx file
                     └── Translator   (optional, localises headers and enum values)
 ```
 
-`Generate` either creates a new workbook or opens an existing one, replaces the named sheet with fresh data, applies script-defined layout, then saves. If the target file does not exist it is created from scratch; if it exists but contains other sheets those sheets are left untouched.
+`Generate` either creates a new workbook or opens an existing one. With a `RowsReader`, it replaces the named sheet with fresh data; with a nil reader, it preserves an existing named sheet while applying script-defined layout. Row data is streamed to a staged workbook and reopened for styles and widths before the final atomic replacement. If the target file does not exist it is created from scratch; if it exists but contains other sheets those sheets are left untouched.
 
 ---
 
