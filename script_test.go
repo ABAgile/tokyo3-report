@@ -327,3 +327,26 @@ func TestGenerateScriptParserError(t *testing.T) {
 	err := Generate(conf, NewStructRows([]any{struct{ Name string }{"Alice"}}))
 	assert.EqualError(t, err, `row 2: parse column "Name" with "fail": invalid value`)
 }
+
+func TestGenerate_PreservesExistingWorkbookOnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.xlsx")
+	conf := &ReportConf{OutputPath: path, SheetName: "TestSheet"}
+	assert.NoError(t, Generate(conf, NewStructRows([]any{
+		struct{ Name string }{"Original"},
+	})))
+
+	conf.Script = `col = {"Name": {"parser": "fail"}}`
+	conf.Parsers = map[string]Parser{
+		"fail": func(any) (any, error) { return nil, errors.New("invalid value") },
+	}
+	assert.Error(t, Generate(conf, NewStructRows([]any{
+		struct{ Name string }{"Replacement"},
+	})))
+
+	f, err := excelize.OpenFile(path)
+	assert.NoError(t, err)
+	defer f.Close()
+	rows, err := f.GetRows("TestSheet")
+	assert.NoError(t, err)
+	assert.Equal(t, [][]string{{"Name"}, {"Original"}}, rows)
+}

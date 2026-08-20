@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -70,9 +71,6 @@ func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
 		return
 	}
 	defer func() {
-		if saveErr := report.excel.SaveAs(report.filePath); err == nil {
-			err = saveErr
-		}
 		if closeErr := report.excel.Close(); err == nil {
 			err = closeErr
 		}
@@ -94,7 +92,10 @@ func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
 	if err = report.processStyleMeta(); err != nil {
 		return
 	}
-	return report.processWidthMeta()
+	if err = report.processWidthMeta(); err != nil {
+		return
+	}
+	return report.saveWorkbook()
 }
 
 func (r *excelReport) openWorkbook() error {
@@ -116,6 +117,36 @@ func (r *excelReport) openWorkbook() error {
 		}
 	}
 	return nil
+}
+
+// saveWorkbook writes beside the target and renames the completed file into
+// place, so a failed write cannot truncate or corrupt the existing workbook.
+func (r *excelReport) saveWorkbook() (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(r.filePath), "."+filepath.Base(r.filePath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			tmp.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Write uses Path to determine the workbook content type. The temporary
+	// filename intentionally has a .tmp suffix, so retain the requested path.
+	r.excel.Path = r.filePath
+	if err = r.excel.Write(tmp); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, r.filePath)
 }
 
 func (r *excelReport) prepareWorksheet() error {
