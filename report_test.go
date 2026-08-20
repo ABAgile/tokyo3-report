@@ -2,6 +2,7 @@ package report
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -99,6 +100,22 @@ func TestGenerate_ReopenOverridesExistingSheet(t *testing.T) {
 	rows, err := f.GetRows("TestSheet")
 	assert.NoError(t, err)
 	assert.Equal(t, [][]string{{"Name"}, {"Overridden"}}, rows)
+}
+
+func TestGenerate_NilRowsPreservesExistingSheet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.xlsx")
+	conf := &ReportConf{OutputPath: path, SheetName: "TestSheet"}
+	assert.NoError(t, Generate(conf, NewStructRows([]any{
+		struct{ Name string }{"Original"},
+	})))
+	assert.NoError(t, Generate(conf, nil))
+
+	f, err := excelize.OpenFile(path)
+	assert.NoError(t, err)
+	defer f.Close()
+	rows, err := f.GetRows("TestSheet")
+	assert.NoError(t, err)
+	assert.Equal(t, [][]string{{"Name"}, {"Original"}}, rows)
 }
 
 func TestCalcCellWidth(t *testing.T) {

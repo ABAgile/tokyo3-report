@@ -80,7 +80,7 @@ func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
 		return
 	}
 
-	if err = report.prepareWorksheet(); err != nil {
+	if err = report.prepareWorksheet(rowReader != nil); err != nil {
 		return
 	}
 	if rowReader != nil {
@@ -149,7 +149,13 @@ func (r *excelReport) saveWorkbook() (err error) {
 	return os.Rename(tmpPath, r.filePath)
 }
 
-func (r *excelReport) prepareWorksheet() error {
+func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
+	if !replaceExisting {
+		if index, err := r.excel.GetSheetIndex(r.sheetName); err == nil && index >= 0 {
+			return nil
+		}
+	}
+
 	sheetName := shortuuid.New()
 	if _, err := r.excel.NewSheet(sheetName); err != nil {
 		return err
@@ -158,7 +164,7 @@ func (r *excelReport) prepareWorksheet() error {
 		if err := r.excel.DeleteSheet(DefaultSheetName); err != nil {
 			return err
 		}
-	} else if _, err := r.excel.GetSheetIndex(r.sheetName); err == nil {
+	} else if index, err := r.excel.GetSheetIndex(r.sheetName); err == nil && index >= 0 {
 		if err := r.excel.DeleteSheet(r.sheetName); err != nil {
 			return err
 		}
