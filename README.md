@@ -19,15 +19,16 @@ go get github.com/abagile/tokyo3-report
 ## Design
 
 ```
-ReportConf ──► Generate(conf, rowReader) ──► .xlsx file
+Generate(outputPath, worksheets...) ──► .xlsx file
                     │
-                    ├── RowsReader   (data source: StructRows or SqlxRows)
-                    ├── Script       (optional Starlark, controls layout & style)
-                    ├── Parsers      (optional named field-value parsers)
-                    └── Translator   (optional, localises headers and enum values)
+                    └── WorksheetConf[]
+                          ├── Rows       (data source: StructRows or SqlxRows)
+                          ├── Script     (optional Starlark, controls layout & style)
+                          ├── Parsers    (optional named field-value parsers)
+                          └── Translator (optional, localises headers and enum values)
 ```
 
-`Generate` either creates a new workbook or opens an existing one. With a `RowsReader`, it replaces the named sheet with fresh data; with a nil reader, it preserves an existing named sheet while applying script-defined layout. Row data is streamed to a staged workbook and reopened for styles and widths before the final atomic replacement. If the target file does not exist it is created from scratch; if it exists but contains other sheets those sheets are left untouched.
+`Generate` either creates a new workbook or opens an existing one. Each worksheet with a `RowsReader` replaces its named sheet with fresh data; a nil reader preserves an existing named sheet while applying script-defined layout. All row data is streamed into one staged workbook, which is reopened for styles and widths before the final atomic replacement. If the target file does not exist it is created from scratch; if it exists, unrelated sheets are left untouched.
 
 ---
 
@@ -47,11 +48,11 @@ rows := []any{
 }
 
 err := report.Generate(
-    &report.ReportConf{
-        OutputPath: "orders.xlsx",
-        SheetName:  "Orders",
+    "orders.xlsx",
+    report.WorksheetConf{
+        SheetName: "Orders",
+        Rows:      report.NewStructRows(rows),
     },
-    report.NewStructRows(rows),
 )
 ```
 
@@ -61,16 +62,15 @@ See the [`example/`](example/) directory for a complete runnable program.
 
 ---
 
-## ReportConf
+## WorksheetConf
 
 | Field        | Type         | Description |
 |--------------|--------------|-------------|
-| `OutputPath` | `string`     | Path to the `.xlsx` file to create or update. |
-| `SheetName`  | `string`     | Name of the worksheet to write. |
+| `SheetName`  | `string`     | Name of the worksheet to write or style. |
+| `Rows`       | `RowsReader` | Optional data source; nil preserves an existing worksheet. |
 | `Script`     | `string`     | Starlark script for layout customisation (see below). |
 | `Translator` | `Translator` | Optional interface for header and value localisation. |
 | `Parsers`    | `map[string]Parser` | Optional named parsers referenced by column metadata. |
-| `QueryPath`  | `string`     | Informational — callers may store the SQL file path here; the library does not read it. |
 
 ---
 
@@ -160,13 +160,15 @@ A `Parser` converts a raw field value before it is written to Excel:
 type Parser func(any) (any, error)
 ```
 
-Register parsers by name in `ReportConf`, then reference those names from the
+Register parsers by name in `WorksheetConf`, then reference those names from the
 script's `col` metadata:
 
 ```go
-conf.Parsers = map[string]report.Parser{
-    "trim": func(value any) (any, error) {
-        return strings.TrimSpace(value.(string)), nil
+worksheet := report.WorksheetConf{
+    Parsers: map[string]report.Parser{
+        "trim": func(value any) (any, error) {
+            return strings.TrimSpace(value.(string)), nil
+        },
     },
 }
 ```
@@ -236,7 +238,7 @@ col = {
         "style": '{"num_fmt":4}',        # #,##0.00
     },
     "status": {
-        "parser": "normalize_status",    # resolves ReportConf.Parsers entry
+        "parser": "normalize_status",    # resolves WorksheetConf.Parsers entry
         "lookup": "order_status",        # receives the parsed value
     },
 }
@@ -246,7 +248,7 @@ col = {
 |----------|--------|-------------|
 | `width`  | number | Column width (same semantics as `width` dict above). |
 | `style`  | string | JSON style applied to the entire column. |
-| `parser` | string | Runs the named `ReportConf.Parsers` entry. Unknown names and parser errors stop generation. |
+| `parser` | string | Runs the named `WorksheetConf.Parsers` entry. Unknown names and parser errors stop generation. |
 | `lookup` | string | Passes the parsed (or raw) value through `Translator.Lookup(key, value)`. No-op when no `Translator` is set. |
 
 `col` style and width entries are merged into the `style` and `width` dicts after the script runs, so they can coexist with direct `style`/`width` entries.

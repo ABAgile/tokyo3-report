@@ -75,14 +75,14 @@ func main() {
 		SalesRecord{"West", "Widget B", 20, 5000.00, time.Date(2024, 3, 4, 0, 0, 0, 0, time.UTC)},
 	}
 
-	conf := &report.ReportConf{
-		OutputPath: "sales_report.xlsx",
+	worksheet := report.WorksheetConf{
 		SheetName:  "Q1 Sales",
+		Rows:       report.NewStructRows(rows),
 		Script:     script,
 		Translator: salesTranslator{},
 	}
 
-	if err := report.Generate(conf, report.NewStructRows(rows)); err != nil {
+	if err := report.Generate("sales_report.xlsx", worksheet); err != nil {
 		log.Fatal(err)
 	}
 

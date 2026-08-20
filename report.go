@@ -39,18 +39,24 @@ type Translator interface {
 // Parser converts a raw field value before any configured lookup is applied.
 type Parser func(any) (any, error)
 
-type ReportConf struct {
-	OutputPath,
-	Script,
-	SheetName string
+type WorksheetConf struct {
+	SheetName  string
+	Rows       RowsReader
+	Script     string
 	Translator Translator
 	Parsers    map[string]Parser
 }
 
+type worksheetState struct {
+	conf        WorksheetConf
+	meta        *scriptMeta
+	fieldWidths []int
+}
+
 type excelReport struct {
-	isNew  bool
-	excel  *excelize.File
-	stream *excelize.StreamWriter
+	hasDefaultSheet bool
+	excel           *excelize.File
+	stream          *excelize.StreamWriter
 
 	filePath,
 	sheetName string
@@ -60,18 +66,15 @@ type excelReport struct {
 	parsers    map[string]Parser
 }
 
-func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
-	report := excelReport{
-		filePath:   conf.OutputPath,
-		sheetName:  conf.SheetName,
-		translator: conf.Translator,
-		parsers:    conf.Parsers,
+func Generate(outputPath string, worksheets ...WorksheetConf) (err error) {
+	if err = validateWorksheets(outputPath, worksheets); err != nil {
+		return
 	}
 
+	report := excelReport{filePath: outputPath}
 	if err = report.openWorkbook(); err != nil {
 		return
 	}
-	var fieldWidths []int
 	var stagedPath string
 	defer func() {
 		if stagedPath != "" {
@@ -82,32 +85,73 @@ func Generate(conf *ReportConf, rowReader RowsReader) (err error) {
 		}
 	}()
 
-	if err = report.runScript(conf.Script); err != nil {
-		return
+	states := make([]worksheetState, len(worksheets))
+	for i, worksheet := range worksheets {
+		report.sheetName = worksheet.SheetName
+		report.translator = worksheet.Translator
+		report.parsers = worksheet.Parsers
+		if err = report.runScript(worksheet.Script); err != nil {
+			return
+		}
+		if err = report.prepareWorksheet(worksheet.Rows != nil); err != nil {
+			return
+		}
+		states[i] = worksheetState{conf: worksheet, meta: report.meta}
 	}
 
-	if err = report.prepareWorksheet(rowReader != nil); err != nil {
-		return
-	}
-	if rowReader != nil {
-		if fieldWidths, err = report.populateSheet(rowReader); err != nil {
-			return
-		}
-		if stagedPath, err = report.stageWorkbook(); err != nil {
-			return
-		}
-		if err = report.applyColumnWidths(fieldWidths); err != nil {
-			return
+	for i := range states {
+		state := &states[i]
+		report.sheetName = state.conf.SheetName
+		report.translator = state.conf.Translator
+		report.parsers = state.conf.Parsers
+		report.meta = state.meta
+		if state.conf.Rows != nil {
+			if state.fieldWidths, err = report.populateSheet(state.conf.Rows); err != nil {
+				return
+			}
 		}
 	}
 
-	if err = report.processStyleMeta(); err != nil {
+	if stagedPath, err = report.stageWorkbook(); err != nil {
 		return
 	}
-	if err = report.processWidthMeta(); err != nil {
-		return
+	for i := range states {
+		state := &states[i]
+		report.sheetName = state.conf.SheetName
+		report.meta = state.meta
+		if err = report.applyColumnWidths(state.fieldWidths); err != nil {
+			return
+		}
+		if err = report.processStyleMeta(); err != nil {
+			return
+		}
+		if err = report.processWidthMeta(); err != nil {
+			return
+		}
 	}
 	return report.saveWorkbook()
+}
+
+func validateWorksheets(outputPath string, worksheets []WorksheetConf) error {
+	if outputPath == "" {
+		return fmt.Errorf("output path is empty")
+	}
+	if len(worksheets) == 0 {
+		return fmt.Errorf("at least one worksheet is required")
+	}
+
+	seen := make(map[string]int, len(worksheets))
+	for i, worksheet := range worksheets {
+		if worksheet.SheetName == "" {
+			return fmt.Errorf("worksheet %d has an empty name", i+1)
+		}
+		key := strings.ToLower(worksheet.SheetName)
+		if previous, ok := seen[key]; ok {
+			return fmt.Errorf("worksheet %d %q duplicates worksheet %d", i+1, worksheet.SheetName, previous)
+		}
+		seen[key] = i + 1
+	}
+	return nil
 }
 
 func (r *excelReport) openWorkbook() error {
@@ -116,11 +160,11 @@ func (r *excelReport) openWorkbook() error {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		r.isNew = true
-	} else {
-		r.isNew = info.Size() == 0
+		r.hasDefaultSheet = true
+	} else if info.Size() == 0 {
+		r.hasDefaultSheet = true
 	}
-	if r.isNew {
+	if r.hasDefaultSheet {
 		r.excel = excelize.NewFile()
 	} else {
 		r.excel, err = excelize.OpenFile(r.filePath)
@@ -161,8 +205,8 @@ func (r *excelReport) writeWorkbookTemp() (tmpPath string, err error) {
 	return tmpPath, nil
 }
 
-// stageWorkbook flushes the streamed worksheet, materializes it, and reopens
-// it so normal-mode style and width operations can safely be applied.
+// stageWorkbook materializes the completed workbook and reopens it so
+// normal-mode style and width operations can safely be applied.
 func (r *excelReport) stageWorkbook() (stagePath string, err error) {
 	stagePath, err = r.writeWorkbookTemp()
 	if err != nil {
@@ -198,8 +242,11 @@ func (r *excelReport) saveWorkbook() (err error) {
 }
 
 func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
-	if !replaceExisting {
-		if index, err := r.excel.GetSheetIndex(r.sheetName); err == nil && index >= 0 {
+	if index, err := r.excel.GetSheetIndex(r.sheetName); err == nil && index >= 0 {
+		if !replaceExisting {
+			if r.hasDefaultSheet && r.sheetName == DefaultSheetName {
+				r.hasDefaultSheet = false
+			}
 			return nil
 		}
 	}
@@ -208,10 +255,11 @@ func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
 	if _, err := r.excel.NewSheet(sheetName); err != nil {
 		return err
 	}
-	if r.isNew {
+	if r.hasDefaultSheet {
 		if err := r.excel.DeleteSheet(DefaultSheetName); err != nil {
 			return err
 		}
+		r.hasDefaultSheet = false
 	} else if index, err := r.excel.GetSheetIndex(r.sheetName); err == nil && index >= 0 {
 		if err := r.excel.DeleteSheet(r.sheetName); err != nil {
 			return err

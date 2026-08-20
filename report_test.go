@@ -1,6 +1,7 @@
 package report
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,11 @@ import (
 )
 
 type simpleTranslator struct{}
+
+func generate(outputPath string, worksheet WorksheetConf, rows RowsReader) error {
+	worksheet.Rows = rows
+	return Generate(outputPath, worksheet)
+}
 
 func (simpleTranslator) Header(key string) string {
 	if key == "Name" {
@@ -22,32 +28,29 @@ func (simpleTranslator) Lookup(_ string, code any) string { return "" }
 func TestGenerate(t *testing.T) {
 	testCases := []struct {
 		name         string
-		conf         *ReportConf
+		outputPath   string
+		worksheet    WorksheetConf
 		rowReader    RowsReader
 		expectedRows [][]string
 	}{
 		{
-			name: "Empty",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_empty.xlsx",
-				SheetName:  "TestSheet",
-			},
+			name:         "Empty",
+			outputPath:   "/tmp/test_empty.xlsx",
+			worksheet:    WorksheetConf{SheetName: "TestSheet"},
 			rowReader:    NewStructRows([]any{}),
 			expectedRows: [][]string{},
 		},
 		{
-			name: "Nil row reader",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_nil_reader.xlsx",
-				SheetName:  "TestSheet",
-			},
+			name:         "Nil row reader",
+			outputPath:   "/tmp/test_nil_reader.xlsx",
+			worksheet:    WorksheetConf{SheetName: "TestSheet"},
 			rowReader:    nil,
 			expectedRows: [][]string{},
 		},
 		{
-			name: "With translator",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_translator.xlsx",
+			name:       "With translator",
+			outputPath: "/tmp/test_translator.xlsx",
+			worksheet: WorksheetConf{
 				SheetName:  "TestSheet",
 				Translator: simpleTranslator{},
 			},
@@ -63,12 +66,12 @@ func TestGenerate(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.NoError(t, Generate(tc.conf, tc.rowReader))
+			assert.NoError(t, generate(tc.outputPath, tc.worksheet, tc.rowReader))
 
-			f, err := excelize.OpenFile(tc.conf.OutputPath)
+			f, err := excelize.OpenFile(tc.outputPath)
 			assert.NoError(t, err)
 
-			rows, err := f.GetRows(tc.conf.SheetName)
+			rows, err := f.GetRows(tc.worksheet.SheetName)
 			assert.NoError(t, err)
 
 			assert.Equal(t, len(tc.expectedRows), len(rows))
@@ -76,20 +79,92 @@ func TestGenerate(t *testing.T) {
 				assert.Equal(t, expectedRow, rows[i])
 			}
 
-			os.Remove(tc.conf.OutputPath)
+			os.Remove(tc.outputPath)
 		})
 	}
+}
+
+func TestGenerate_MultipleWorksheets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.xlsx")
+	worksheets := []WorksheetConf{
+		{
+			SheetName: "First",
+			Rows:      NewStructRows([]any{struct{ Name string }{"Alice"}}),
+			Script:    `style = {"A1": "{\"font\":{\"bold\":true}}"}`,
+		},
+		{
+			SheetName: "Second",
+			Rows:      NewStructRows([]any{struct{ Value string }{"Ready"}}),
+			Script:    `width = {"A": 25}`,
+		},
+	}
+
+	assert.NoError(t, Generate(path, worksheets...))
+	f, err := excelize.OpenFile(path)
+	assert.NoError(t, err)
+	defer f.Close()
+	assert.Equal(t, []string{"First", "Second"}, f.GetSheetList())
+
+	rows, err := f.GetRows("First")
+	assert.NoError(t, err)
+	assert.Equal(t, [][]string{{"Name"}, {"Alice"}}, rows)
+	rows, err = f.GetRows("Second")
+	assert.NoError(t, err)
+	assert.Equal(t, [][]string{{"Value"}, {"Ready"}}, rows)
+
+	styleID, err := f.GetCellStyle("First", "A1")
+	assert.NoError(t, err)
+	style, err := f.GetStyle(styleID)
+	assert.NoError(t, err)
+	assert.True(t, style.Font.Bold)
+	width, err := f.GetColWidth("Second", "A")
+	assert.NoError(t, err)
+	assert.Equal(t, 25.0, width)
+}
+
+func TestGenerate_MultipleWorksheetsPreservesOutputOnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.xlsx")
+	valid := func(first, second string) []WorksheetConf {
+		return []WorksheetConf{
+			{SheetName: "First", Rows: NewStructRows([]any{struct{ Name string }{first}})},
+			{SheetName: "Second", Rows: NewStructRows([]any{struct{ Name string }{second}})},
+		}
+	}
+	assert.NoError(t, Generate(path, valid("Original first", "Original second")...))
+
+	failed := []WorksheetConf{
+		{SheetName: "First", Rows: NewStructRows([]any{struct{ Name string }{"Replacement first"}})},
+		{
+			SheetName: "Second",
+			Rows:      NewStructRows([]any{struct{ Name string }{"Replacement second"}}),
+			Script:    `col = {"Name": {"parser": "fail"}}`,
+			Parsers: map[string]Parser{
+				"fail": func(any) (any, error) { return nil, errors.New("invalid value") },
+			},
+		},
+	}
+	assert.Error(t, Generate(path, failed...))
+
+	f, err := excelize.OpenFile(path)
+	assert.NoError(t, err)
+	defer f.Close()
+	rows, err := f.GetRows("First")
+	assert.NoError(t, err)
+	assert.Equal(t, [][]string{{"Name"}, {"Original first"}}, rows)
+	rows, err = f.GetRows("Second")
+	assert.NoError(t, err)
+	assert.Equal(t, [][]string{{"Name"}, {"Original second"}}, rows)
 }
 
 func TestGenerate_ReopenOverridesExistingSheet(t *testing.T) {
 	path := "/tmp/test_reopen.xlsx"
 	defer os.Remove(path)
-	conf := &ReportConf{OutputPath: path, SheetName: "TestSheet"}
+	worksheet := WorksheetConf{SheetName: "TestSheet"}
 
-	assert.NoError(t, Generate(conf, NewStructRows([]any{
+	assert.NoError(t, generate(path, worksheet, NewStructRows([]any{
 		struct{ Name string }{"Original"},
 	})))
-	assert.NoError(t, Generate(conf, NewStructRows([]any{
+	assert.NoError(t, generate(path, worksheet, NewStructRows([]any{
 		struct{ Name string }{"Overridden"},
 	})))
 
@@ -104,11 +179,11 @@ func TestGenerate_ReopenOverridesExistingSheet(t *testing.T) {
 
 func TestGenerate_NilRowsPreservesExistingSheet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.xlsx")
-	conf := &ReportConf{OutputPath: path, SheetName: "TestSheet"}
-	assert.NoError(t, Generate(conf, NewStructRows([]any{
+	worksheet := WorksheetConf{SheetName: "TestSheet"}
+	assert.NoError(t, generate(path, worksheet, NewStructRows([]any{
 		struct{ Name string }{"Original"},
 	})))
-	assert.NoError(t, Generate(conf, nil))
+	assert.NoError(t, Generate(path, worksheet))
 
 	f, err := excelize.OpenFile(path)
 	assert.NoError(t, err)

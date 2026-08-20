@@ -25,13 +25,10 @@ func (lookupTranslator) Lookup(_ string, code any) string {
 }
 
 func TestGenerateScript_InvalidScript(t *testing.T) {
-	conf := &ReportConf{
-		OutputPath: "/tmp/test_invalid_script.xlsx",
-		SheetName:  "TestSheet",
-		Script:     "x = (",
-	}
-	defer os.Remove(conf.OutputPath)
-	assert.Error(t, Generate(conf, nil))
+	outputPath := "/tmp/test_invalid_script.xlsx"
+	worksheet := WorksheetConf{SheetName: "TestSheet", Script: "x = ("}
+	defer os.Remove(outputPath)
+	assert.Error(t, generate(outputPath, worksheet, nil))
 }
 
 func TestGenerateScript(t *testing.T) {
@@ -55,18 +52,16 @@ func TestGenerateScript(t *testing.T) {
 
 	testCases := []struct {
 		name             string
-		conf             *ReportConf
+		outputPath       string
+		worksheet        WorksheetConf
 		rowReader        RowsReader
 		expectedRows     [][]string
 		customValidation func(t *testing.T, f *excelize.File)
 	}{
 		{
-			name: "With Grouping",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_group.xlsx",
-				SheetName:  "TestSheet",
-				Script:     "groupFields = [\"Group\"]",
-			},
+			name:       "With Grouping",
+			outputPath: "/tmp/test_group.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: "groupFields = [\"Group\"]"},
 			rowReader: NewStructRows([]any{
 				TestGroupStruct{Group: "A", Value: 1},
 				TestGroupStruct{Group: "A", Value: 2},
@@ -84,12 +79,9 @@ func TestGenerateScript(t *testing.T) {
 			// Regression test: insertGroupBreaks must insert at most one blank
 			// row per data-row transition, even when several group fields differ
 			// at once (e.g. row 2 -> row 3 differs in both GroupA and GroupB).
-			name: "With Multi-field Grouping",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_multi_group.xlsx",
-				SheetName:  "TestSheet",
-				Script:     `groupFields = ["GroupA", "GroupB"]`,
-			},
+			name:       "With Multi-field Grouping",
+			outputPath: "/tmp/test_multi_group.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: `groupFields = ["GroupA", "GroupB"]`},
 			rowReader: NewStructRows([]any{
 				TestMultiGroupStruct{GroupA: "A", GroupB: "X", Value: 1},
 				TestMultiGroupStruct{GroupA: "A", GroupB: "Y", Value: 2},
@@ -105,10 +97,10 @@ func TestGenerateScript(t *testing.T) {
 			},
 		},
 		{
-			name: "With Script",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_script.xlsx",
-				SheetName:  "TestSheet",
+			name:       "With Script",
+			outputPath: "/tmp/test_script.xlsx",
+			worksheet: WorksheetConf{
+				SheetName: "TestSheet",
 				Script: `
 width = {"A": 50}
 style = {"C": "{\"font\":{\"bold\":true}}"}
@@ -141,24 +133,18 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			},
 		},
 		{
-			name: "Row style",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_row_style.xlsx",
-				SheetName:  "TestSheet",
-				Script:     `style = {"1": "{\"font\":{\"bold\":true}}"}`,
-			},
+			name:       "Row style",
+			outputPath: "/tmp/test_row_style.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: `style = {"1": "{\"font\":{\"bold\":true}}"}`},
 			rowReader: NewStructRows([]any{
 				struct{ Name string }{"Alice"},
 			}),
 			expectedRows: [][]string{{"Name"}, {"Alice"}},
 		},
 		{
-			name: "Cell style",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_cell_style.xlsx",
-				SheetName:  "TestSheet",
-				Script:     `style = {"A1": "{\"font\":{\"bold\":true}}"}`,
-			},
+			name:       "Cell style",
+			outputPath: "/tmp/test_cell_style.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: `style = {"A1": "{\"font\":{\"bold\":true}}"}`},
 			rowReader: NewStructRows([]any{
 				struct{ Name string }{"Alice"},
 			}),
@@ -172,12 +158,9 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			},
 		},
 		{
-			name: "Column range width",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_range_width.xlsx",
-				SheetName:  "TestSheet",
-				Script:     `width = {"A:B": 25}`,
-			},
+			name:       "Column range width",
+			outputPath: "/tmp/test_range_width.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: `width = {"A:B": 25}`},
 			rowReader: NewStructRows([]any{
 				struct{ Name, Role string }{"Alice", "Dev"},
 			}),
@@ -191,12 +174,9 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			},
 		},
 		{
-			name: "Width via col meta",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_col_meta_width.xlsx",
-				SheetName:  "TestSheet",
-				Script:     `col = {"Name": {"width": 30}}`,
-			},
+			name:       "Width via col meta",
+			outputPath: "/tmp/test_col_meta_width.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: `col = {"Name": {"width": 30}}`},
 			rowReader: NewStructRows([]any{
 				struct{ Name string }{"Alice"},
 			}),
@@ -211,12 +191,9 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			// Regression test: processColumnMeta must ignore col meta entries
 			// that reference a column name absent from the header row instead
 			// of falling back to index 0 and corrupting column A's width.
-			name: "Col meta with unknown column",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_col_meta_unknown.xlsx",
-				SheetName:  "TestSheet",
-				Script:     `col = {"DoesNotExist": {"width": 30}}`,
-			},
+			name:       "Col meta with unknown column",
+			outputPath: "/tmp/test_col_meta_unknown.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: `col = {"DoesNotExist": {"width": 30}}`},
 			rowReader: NewStructRows([]any{
 				struct{ Name string }{"Alice"},
 			}),
@@ -228,11 +205,11 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			},
 		},
 		{
-			name: "With parser",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_parser.xlsx",
-				SheetName:  "TestSheet",
-				Script:     `col = {"Name": {"parser": "uppercase"}}`,
+			name:       "With parser",
+			outputPath: "/tmp/test_parser.xlsx",
+			worksheet: WorksheetConf{
+				SheetName: "TestSheet",
+				Script:    `col = {"Name": {"parser": "uppercase"}}`,
 				Parsers: map[string]Parser{
 					"uppercase": func(value any) (any, error) {
 						return strings.ToUpper(value.(string)), nil
@@ -243,9 +220,9 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			expectedRows: [][]string{{"Name"}, {"ALICE"}},
 		},
 		{
-			name: "With lookup",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_lookup.xlsx",
+			name:       "With lookup",
+			outputPath: "/tmp/test_lookup.xlsx",
+			worksheet: WorksheetConf{
 				SheetName:  "TestSheet",
 				Script:     `col = {"Status": {"lookup": "status"}}`,
 				Translator: lookupTranslator{},
@@ -262,9 +239,9 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 			},
 		},
 		{
-			name: "Parser before lookup",
-			conf: &ReportConf{
-				OutputPath: "/tmp/test_parser_lookup.xlsx",
+			name:       "Parser before lookup",
+			outputPath: "/tmp/test_parser_lookup.xlsx",
+			worksheet: WorksheetConf{
 				SheetName:  "TestSheet",
 				Script:     `col = {"Status": {"parser": "status_code", "lookup": "status"}}`,
 				Translator: lookupTranslator{},
@@ -281,12 +258,12 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.NoError(t, Generate(tc.conf, tc.rowReader))
+			assert.NoError(t, generate(tc.outputPath, tc.worksheet, tc.rowReader))
 
-			f, err := excelize.OpenFile(tc.conf.OutputPath)
+			f, err := excelize.OpenFile(tc.outputPath)
 			assert.NoError(t, err)
 
-			rows, err := f.GetRows(tc.conf.SheetName)
+			rows, err := f.GetRows(tc.worksheet.SheetName)
 			assert.NoError(t, err)
 
 			assert.Equal(t, len(tc.expectedRows), len(rows))
@@ -298,48 +275,45 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 				tc.customValidation(t, f)
 			}
 
-			os.Remove(tc.conf.OutputPath)
+			os.Remove(tc.outputPath)
 		})
 	}
 }
 
 func TestGenerateScriptUnknownParser(t *testing.T) {
-	conf := &ReportConf{
-		OutputPath: filepath.Join(t.TempDir(), "unknown-parser.xlsx"),
-		SheetName:  "TestSheet",
-		Script:     `col = {"Name": {"parser": "missing"}}`,
-	}
+	outputPath := filepath.Join(t.TempDir(), "unknown-parser.xlsx")
+	worksheet := WorksheetConf{SheetName: "TestSheet", Script: `col = {"Name": {"parser": "missing"}}`}
 
-	err := Generate(conf, NewStructRows([]any{struct{ Name string }{"Alice"}}))
+	err := generate(outputPath, worksheet, NewStructRows([]any{struct{ Name string }{"Alice"}}))
 	assert.EqualError(t, err, `parser "missing" for column "Name" is not registered`)
 }
 
 func TestGenerateScriptParserError(t *testing.T) {
-	conf := &ReportConf{
-		OutputPath: filepath.Join(t.TempDir(), "parser-error.xlsx"),
-		SheetName:  "TestSheet",
-		Script:     `col = {"Name": {"parser": "fail"}}`,
+	outputPath := filepath.Join(t.TempDir(), "parser-error.xlsx")
+	worksheet := WorksheetConf{
+		SheetName: "TestSheet",
+		Script:    `col = {"Name": {"parser": "fail"}}`,
 		Parsers: map[string]Parser{
 			"fail": func(any) (any, error) { return nil, errors.New("invalid value") },
 		},
 	}
 
-	err := Generate(conf, NewStructRows([]any{struct{ Name string }{"Alice"}}))
+	err := generate(outputPath, worksheet, NewStructRows([]any{struct{ Name string }{"Alice"}}))
 	assert.EqualError(t, err, `row 2: parse column "Name" with "fail": invalid value`)
 }
 
 func TestGenerate_PreservesExistingWorkbookOnError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.xlsx")
-	conf := &ReportConf{OutputPath: path, SheetName: "TestSheet"}
-	assert.NoError(t, Generate(conf, NewStructRows([]any{
+	worksheet := WorksheetConf{SheetName: "TestSheet"}
+	assert.NoError(t, generate(path, worksheet, NewStructRows([]any{
 		struct{ Name string }{"Original"},
 	})))
 
-	conf.Script = `col = {"Name": {"parser": "fail"}}`
-	conf.Parsers = map[string]Parser{
+	worksheet.Script = `col = {"Name": {"parser": "fail"}}`
+	worksheet.Parsers = map[string]Parser{
 		"fail": func(any) (any, error) { return nil, errors.New("invalid value") },
 	}
-	assert.Error(t, Generate(conf, NewStructRows([]any{
+	assert.Error(t, generate(path, worksheet, NewStructRows([]any{
 		struct{ Name string }{"Replacement"},
 	})))
 
