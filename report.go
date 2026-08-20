@@ -178,11 +178,21 @@ func (r *excelReport) openWorkbook() error {
 // writeWorkbookTemp writes the workbook to a sibling temporary file and
 // returns its path without changing the output path.
 func (r *excelReport) writeWorkbookTemp() (tmpPath string, err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(r.filePath), "."+filepath.Base(r.filePath)+".tmp-*.xlsx")
+	targetPath, err := resolveOutputPath(r.filePath)
 	if err != nil {
 		return "", err
 	}
-	tmpPath = tmp.Name()
+
+	mode, replacing := os.FileMode(0o666), false
+	if info, statErr := os.Stat(targetPath); statErr == nil {
+		mode, replacing = info.Mode().Perm(), true
+	}
+
+	tmpPath = filepath.Join(filepath.Dir(targetPath), "."+filepath.Base(targetPath)+".tmp-"+shortuuid.New()+".xlsx")
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return "", err
+	}
 	defer func() {
 		if err != nil {
 			tmp.Close()
@@ -201,6 +211,11 @@ func (r *excelReport) writeWorkbookTemp() (tmpPath string, err error) {
 	}
 	if err = tmp.Close(); err != nil {
 		return "", err
+	}
+	if replacing {
+		if err = os.Chmod(tmpPath, mode); err != nil {
+			return "", err
+		}
 	}
 	return tmpPath, nil
 }
@@ -235,10 +250,29 @@ func (r *excelReport) saveWorkbook() (err error) {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(tmpPath, r.filePath); err != nil {
+	targetPath, err := resolveOutputPath(r.filePath)
+	if err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err = os.Rename(tmpPath, targetPath); err != nil {
 		os.Remove(tmpPath)
 	}
 	return err
+}
+
+// resolveOutputPath follows existing symlinks so atomic replacement updates
+// their target instead of replacing the symlink itself. A new path is kept as
+// requested because there is no link target to resolve.
+func resolveOutputPath(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	return "", err
 }
 
 func (r *excelReport) prepareWorksheet(replaceExisting bool) error {

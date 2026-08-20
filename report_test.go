@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -82,6 +83,35 @@ func TestGenerate(t *testing.T) {
 			os.Remove(tc.outputPath)
 		})
 	}
+}
+
+func TestGenerate_PreservesOutputSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires additional Windows privileges")
+	}
+
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "versioned.xlsx")
+	linkPath := filepath.Join(dir, "current.xlsx")
+	worksheet := WorksheetConf{
+		SheetName: "Sheet",
+		Rows:      NewStructRows([]any{struct{ Value string }{"old"}}),
+	}
+	assert.NoError(t, Generate(targetPath, worksheet))
+	assert.NoError(t, os.Symlink(filepath.Base(targetPath), linkPath))
+
+	worksheet.Rows = NewStructRows([]any{struct{ Value string }{"new"}})
+	assert.NoError(t, Generate(linkPath, worksheet))
+
+	info, err := os.Lstat(linkPath)
+	assert.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+	f, err := excelize.OpenFile(targetPath)
+	assert.NoError(t, err)
+	defer f.Close()
+	rows, err := f.GetRows("Sheet")
+	assert.NoError(t, err)
+	assert.Equal(t, [][]string{{"Value"}, {"new"}}, rows)
 }
 
 func TestGenerate_MultipleWorksheets(t *testing.T) {
