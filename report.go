@@ -56,7 +56,6 @@ type worksheetState struct {
 type excelReport struct {
 	hasDefaultSheet bool
 	excel           *excelize.File
-	stream          *excelize.StreamWriter
 
 	filePath,
 	sheetName string
@@ -90,10 +89,10 @@ func Generate(outputPath string, worksheets ...WorksheetConf) (err error) {
 		state := &states[i]
 		state.WorksheetConf = worksheet
 		report.selectWorksheet(state)
-		if err = report.runScript(worksheet.Script); err != nil {
+		if err = report.runScript(state.Script); err != nil {
 			return
 		}
-		if err = report.prepareWorksheet(worksheet.Rows != nil); err != nil {
+		if err = report.prepareWorksheet(state.Rows != nil); err != nil {
 			return
 		}
 		state.meta = report.meta
@@ -321,23 +320,22 @@ func (r *excelReport) populateSheet(rowReader RowsReader) ([]int, error) {
 		return nil, err
 	}
 
-	r.stream, err = r.excel.NewStreamWriter(r.sheetName)
+	stream, err := r.excel.NewStreamWriter(r.sheetName)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.stream.SetRow("A1", headers); err != nil {
+	if err := stream.SetRow("A1", headers); err != nil {
 		return nil, err
 	}
-	if err := r.writeDataRows(rowReader, headerIndices, fieldWidths); err != nil {
+	if err := r.writeDataRows(stream, rowReader, headerIndices, fieldWidths); err != nil {
 		return nil, err
 	}
 	if err := rowReader.Err(); err != nil {
 		return nil, err
 	}
-	if err := r.stream.Flush(); err != nil {
+	if err := stream.Flush(); err != nil {
 		return nil, err
 	}
-	r.stream = nil
 	return fieldWidths, nil
 }
 
@@ -362,7 +360,7 @@ func (r *excelReport) prepareHeaders(rowReader RowsReader) ([]any, map[string]in
 	return headers, headerIndices, fieldWidths, nil
 }
 
-func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[string]int, fieldWidths []int) error {
+func (r *excelReport) writeDataRows(stream *excelize.StreamWriter, rowReader RowsReader, headerIndices map[string]int, fieldWidths []int) error {
 	dateStyleID, err := r.excel.NewStyle(&excelize.Style{NumFmt: OpenXMLShortDateFmtDateId})
 	if err != nil {
 		return err
@@ -385,7 +383,7 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 		}
 
 		if lastRow != nil {
-			if rowIdx, err = r.insertGroupBreaks(rowIdx, fields, lastRow, headerIndices); err != nil {
+			if rowIdx, err = r.insertGroupBreaks(stream, rowIdx, fields, lastRow, headerIndices); err != nil {
 				return err
 			}
 		}
@@ -398,7 +396,7 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 				values[col] = field
 			}
 		}
-		if err := r.stream.SetRow(fmt.Sprintf("A%d", rowIdx), values); err != nil {
+		if err := stream.SetRow(fmt.Sprintf("A%d", rowIdx), values); err != nil {
 			return err
 		}
 		trackFieldWidths(fields, fieldWidths)
@@ -408,10 +406,10 @@ func (r *excelReport) writeDataRows(rowReader RowsReader, headerIndices map[stri
 	return nil
 }
 
-func (r *excelReport) insertGroupBreaks(rowIdx int, fields, lastRow []any, headerIndices map[string]int) (int, error) {
+func (r *excelReport) insertGroupBreaks(stream *excelize.StreamWriter, rowIdx int, fields, lastRow []any, headerIndices map[string]int) (int, error) {
 	for _, field := range r.meta.groupFields {
 		if colIdx, ok := headerIndices[field]; ok && fields[colIdx] != lastRow[colIdx] {
-			if err := r.stream.SetRow(fmt.Sprintf("A%d", rowIdx), []any{}); err != nil {
+			if err := stream.SetRow(fmt.Sprintf("A%d", rowIdx), []any{}); err != nil {
 				return rowIdx, err
 			}
 			return rowIdx + 1, nil
