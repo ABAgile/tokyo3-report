@@ -48,7 +48,7 @@ type WorksheetConf struct {
 }
 
 type worksheetState struct {
-	conf        WorksheetConf
+	WorksheetConf
 	meta        *scriptMeta
 	fieldWidths []int
 }
@@ -87,26 +87,23 @@ func Generate(outputPath string, worksheets ...WorksheetConf) (err error) {
 
 	states := make([]worksheetState, len(worksheets))
 	for i, worksheet := range worksheets {
-		report.sheetName = worksheet.SheetName
-		report.translator = worksheet.Translator
-		report.parsers = worksheet.Parsers
+		state := &states[i]
+		state.WorksheetConf = worksheet
+		report.selectWorksheet(state)
 		if err = report.runScript(worksheet.Script); err != nil {
 			return
 		}
 		if err = report.prepareWorksheet(worksheet.Rows != nil); err != nil {
 			return
 		}
-		states[i] = worksheetState{conf: worksheet, meta: report.meta}
+		state.meta = report.meta
 	}
 
 	for i := range states {
 		state := &states[i]
-		report.sheetName = state.conf.SheetName
-		report.translator = state.conf.Translator
-		report.parsers = state.conf.Parsers
-		report.meta = state.meta
-		if state.conf.Rows != nil {
-			if state.fieldWidths, err = report.populateSheet(state.conf.Rows); err != nil {
+		report.selectWorksheet(state)
+		if state.Rows != nil {
+			if state.fieldWidths, err = report.populateSheet(state.Rows); err != nil {
 				return
 			}
 		}
@@ -117,8 +114,7 @@ func Generate(outputPath string, worksheets ...WorksheetConf) (err error) {
 	}
 	for i := range states {
 		state := &states[i]
-		report.sheetName = state.conf.SheetName
-		report.meta = state.meta
+		report.selectWorksheet(state)
 		if err = report.applyColumnWidths(state.fieldWidths); err != nil {
 			return
 		}
@@ -152,6 +148,13 @@ func validateWorksheets(outputPath string, worksheets []WorksheetConf) error {
 		seen[key] = i + 1
 	}
 	return nil
+}
+
+func (r *excelReport) selectWorksheet(state *worksheetState) {
+	r.sheetName = state.SheetName
+	r.translator = state.Translator
+	r.parsers = state.Parsers
+	r.meta = state.meta
 }
 
 func (r *excelReport) openWorkbook() error {
@@ -276,13 +279,13 @@ func resolveOutputPath(path string) (string, error) {
 }
 
 func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
-	if index, err := r.excel.GetSheetIndex(r.sheetName); err == nil && index >= 0 {
-		if !replaceExisting {
-			if r.hasDefaultSheet && r.sheetName == DefaultSheetName {
-				r.hasDefaultSheet = false
-			}
-			return nil
+	index, err := r.excel.GetSheetIndex(r.sheetName)
+	exists := err == nil && index >= 0
+	if exists && !replaceExisting {
+		if r.hasDefaultSheet && r.sheetName == DefaultSheetName {
+			r.hasDefaultSheet = false
 		}
+		return nil
 	}
 
 	sheetName := shortuuid.New()
@@ -294,7 +297,7 @@ func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
 			return err
 		}
 		r.hasDefaultSheet = false
-	} else if index, err := r.excel.GetSheetIndex(r.sheetName); err == nil && index >= 0 {
+	} else if exists {
 		if err := r.excel.DeleteSheet(r.sheetName); err != nil {
 			return err
 		}
