@@ -51,6 +51,7 @@ type worksheetState struct {
 	WorksheetConf
 	meta        *scriptMeta
 	fieldWidths []int
+	styleIDs    map[string]int
 }
 
 type excelReport struct {
@@ -74,11 +75,7 @@ func Generate(outputPath string, worksheets ...WorksheetConf) (err error) {
 	if err = report.openWorkbook(); err != nil {
 		return
 	}
-	var stagedPath string
 	defer func() {
-		if stagedPath != "" {
-			os.Remove(stagedPath)
-		}
 		if closeErr := report.excel.Close(); err == nil {
 			err = closeErr
 		}
@@ -96,35 +93,24 @@ func Generate(outputPath string, worksheets ...WorksheetConf) (err error) {
 			return
 		}
 		state.meta = report.meta
+		if state.Rows == nil {
+			if state.styleIDs, err = report.processStyleMeta(); err != nil {
+				return
+			}
+		}
 	}
 
 	for i := range states {
 		state := &states[i]
 		report.selectWorksheet(state)
 		if state.Rows != nil {
-			if state.fieldWidths, err = report.populateSheet(state.Rows); err != nil {
+			if state.fieldWidths, state.styleIDs, err = report.populateSheet(state.Rows); err != nil {
 				return
 			}
 		}
 	}
 
-	if stagedPath, err = report.stageWorkbook(); err != nil {
-		return
-	}
-	for i := range states {
-		state := &states[i]
-		report.selectWorksheet(state)
-		if err = report.applyColumnWidths(state.fieldWidths); err != nil {
-			return
-		}
-		if err = report.processStyleMeta(); err != nil {
-			return
-		}
-		if err = report.processWidthMeta(); err != nil {
-			return
-		}
-	}
-	return report.saveWorkbook()
+	return report.saveWorkbook(states)
 }
 
 func validateWorksheets(outputPath string, worksheets []WorksheetConf) error {
@@ -222,12 +208,14 @@ func (r *excelReport) writeWorkbookTemp() (tmpPath string, err error) {
 	return tmpPath, nil
 }
 
-// stageWorkbook materializes the completed workbook and reopens it so
-// normal-mode style and width operations can safely be applied.
-func (r *excelReport) stageWorkbook() (stagePath string, err error) {
-	stagePath, err = r.writeWorkbookTemp()
+// saveWorkbook writes the completed workbook to a sibling temporary file,
+// patches styles and column widths directly in its worksheet XML, and then
+// atomically replaces the output. The staged file is never read back into
+// Excelize, so worksheet data is never materialized in memory.
+func (r *excelReport) saveWorkbook(states []worksheetState) (err error) {
+	stagePath, err := r.writeWorkbookTemp()
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer func() {
 		if err != nil {
@@ -235,32 +223,14 @@ func (r *excelReport) stageWorkbook() (stagePath string, err error) {
 		}
 	}()
 
-	if err = r.excel.Close(); err != nil {
-		return "", err
-	}
-	excel, err := excelize.OpenFile(stagePath)
-	if err != nil {
-		return "", err
-	}
-	r.excel = excel
-	return stagePath, nil
-}
-
-// saveWorkbook atomically replaces the output with a completed workbook.
-func (r *excelReport) saveWorkbook() (err error) {
-	tmpPath, err := r.writeWorkbookTemp()
-	if err != nil {
+	if err = r.applyWorksheetMeta(stagePath, states); err != nil {
 		return err
 	}
 	targetPath, err := resolveOutputPath(r.filePath)
 	if err != nil {
-		os.Remove(tmpPath)
 		return err
 	}
-	if err = os.Rename(tmpPath, targetPath); err != nil {
-		os.Remove(tmpPath)
-	}
-	return err
+	return os.Rename(stagePath, targetPath)
 }
 
 // resolveOutputPath follows existing symlinks so atomic replacement updates
@@ -304,39 +274,43 @@ func (r *excelReport) prepareWorksheet(replaceExisting bool) error {
 	return r.excel.SetSheetName(sheetName, r.sheetName)
 }
 
-func (r *excelReport) populateSheet(rowReader RowsReader) ([]int, error) {
+func (r *excelReport) populateSheet(rowReader RowsReader) ([]int, map[string]int, error) {
 	if err := rowReader.Read(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if rowReader.Err() == sql.ErrNoRows {
-		return nil, nil
+		styleIDs, err := r.processStyleMeta()
+		return nil, styleIDs, err
 	}
 
 	headers, headerIndices, fieldWidths, err := r.prepareHeaders(rowReader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := r.processColumnMeta(headerIndices); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
+	styleIDs, err := r.processStyleMeta()
+	if err != nil {
+		return nil, nil, err
+	}
 	stream, err := r.excel.NewStreamWriter(r.sheetName)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := stream.SetRow("A1", headers); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := r.writeDataRows(stream, rowReader, headerIndices, fieldWidths); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := rowReader.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := stream.Flush(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return fieldWidths, nil
+	return fieldWidths, styleIDs, nil
 }
 
 func (r *excelReport) prepareHeaders(rowReader RowsReader) ([]any, map[string]int, []int, error) {
@@ -432,19 +406,6 @@ func trackFieldWidths(fields []any, fieldWidths []int) {
 	}
 }
 
-func (r *excelReport) applyColumnWidths(fieldWidths []int) error {
-	for colIdx, width := range fieldWidths {
-		col, err := excelize.ColumnNumberToName(colIdx + 1)
-		if err != nil {
-			return err
-		}
-		if err := r.excel.SetColWidth(r.sheetName, col, col, boundedCellWidth(float64(width)*1.123)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 	for k, m := range r.meta.col {
 		colIdx, ok := headerIndices[k]
@@ -486,65 +447,152 @@ func (r *excelReport) processColumnMeta(headerIndices map[string]int) error {
 	return nil
 }
 
-func (r *excelReport) processStyleMeta() error {
-	// Apply styles in specificity order (columns → rows → cells) so that
-	// more-specific targets win at intersections (e.g. a row-bold style beats
-	// a column-numfmt style at their shared header cell).
-	classify := func(target string) int {
-		if colRe.MatchString(target) {
-			return styleTargetCol
+func styleTargetKind(target string) int {
+	if colRe.MatchString(target) {
+		return styleTargetCol
+	}
+	if _, err := strconv.Atoi(target); err == nil {
+		return styleTargetRow
+	}
+	return styleTargetCell
+}
+
+// processStyleMeta parses script styles and creates workbook-wide IDs. XML
+// targets are applied later by applyWorksheetMeta.
+func (r *excelReport) processStyleMeta() (map[string]int, error) {
+	styleIDs := make(map[string]int, len(r.meta.style))
+	for target, styleJSON := range r.meta.style {
+		target = normalizeTarget(target)
+		var style excelize.Style
+		if err := json.Unmarshal([]byte(styleJSON), &style); err != nil {
+			return nil, err
 		}
-		if _, err := strconv.Atoi(target); err == nil {
-			return styleTargetRow
+		styleID, err := r.excel.NewStyle(&style)
+		if err != nil {
+			return nil, err
 		}
-		return styleTargetCell
+		styleIDs[target] = styleID
+	}
+	return styleIDs, nil
+}
+
+func worksheetPatchRulesForState(state worksheetState) (patchRules, error) {
+	rules := patchRules{
+		Cells: make(map[string]int),
+	}
+	for target, styleID := range state.styleIDs {
+		target = normalizeTarget(target)
+		switch styleTargetKind(target) {
+		case styleTargetCol:
+			fromCol, toCol, err := columnSpan(target)
+			if err != nil {
+				return patchRules{}, err
+			}
+			rules.Cols = append(rules.Cols, styleSpan{Min: fromCol, Max: toCol, StyleID: styleID})
+		case styleTargetRow:
+			row, err := strconv.Atoi(target)
+			if err != nil || row < 1 || row > excelize.TotalRows {
+				return patchRules{}, fmt.Errorf("invalid style row %q", target)
+			}
+			rules.Rows = append(rules.Rows, styleSpan{Min: row, Max: row, StyleID: styleID})
+		case styleTargetCell:
+			from, to := colRange(target)
+			fromCol, fromRow, err := excelize.CellNameToCoordinates(from)
+			if err != nil {
+				return patchRules{}, err
+			}
+			toCol, toRow, err := excelize.CellNameToCoordinates(to)
+			if err != nil {
+				return patchRules{}, err
+			}
+			if fromCol > toCol {
+				fromCol, toCol = toCol, fromCol
+			}
+			if fromRow > toRow {
+				fromRow, toRow = toRow, fromRow
+			}
+			if fromCol == toCol && fromRow == toRow {
+				rules.Cells[normalCellRef(from)] = styleID
+			} else {
+				rules.CellRanges = append(rules.CellRanges, cellSpan{
+					FromCol: fromCol,
+					ToCol:   toCol,
+					FromRow: fromRow,
+					ToRow:   toRow,
+					StyleID: styleID,
+				})
+			}
+		}
 	}
 
-	for _, bucket := range []int{styleTargetCol, styleTargetRow, styleTargetCell} {
-		for target, styleJSON := range r.meta.style {
+	// Auto-sized widths are the baseline; explicit width metadata is appended
+	// afterward so it overrides the automatic value.
+	for colIdx, width := range state.fieldWidths {
+		if _, err := excelize.ColumnNumberToName(colIdx + 1); err != nil {
+			return patchRules{}, err
+		}
+		rules.Widths = append(rules.Widths, widthSpan{
+			Min:   colIdx + 1,
+			Max:   colIdx + 1,
+			Width: boundedCellWidth(float64(width) * 1.123),
+		})
+	}
+	if state.meta != nil {
+		for target, width := range state.meta.width {
 			target = normalizeTarget(target)
-			if classify(target) != bucket {
+			if !colRe.MatchString(target) {
 				continue
 			}
-
-			var style excelize.Style
-			if err := json.Unmarshal([]byte(styleJSON), &style); err != nil {
-				return err
-			}
-			styleID, err := r.excel.NewStyle(&style)
+			fromCol, toCol, err := columnSpan(target)
 			if err != nil {
-				return err
+				return patchRules{}, err
 			}
-			if err := r.applyStyleTarget(bucket, target, styleID); err != nil {
-				return err
-			}
+			rules.Widths = append(rules.Widths, widthSpan{
+				Min:   fromCol,
+				Max:   toCol,
+				Width: boundedCellWidth(width),
+			})
 		}
 	}
-	return nil
+	return rules, nil
 }
 
-func (r *excelReport) applyStyleTarget(bucket int, target string, styleID int) error {
-	switch bucket {
-	case styleTargetCol:
-		return r.excel.SetColStyle(r.sheetName, target, styleID)
-	case styleTargetRow:
-		rowNum, _ := strconv.Atoi(target)
-		return r.excel.SetRowStyle(r.sheetName, rowNum, rowNum, styleID)
-	default:
-		from, to := colRange(target)
-		return r.excel.SetCellStyle(r.sheetName, from, to, styleID)
+// applyWorksheetMeta rewrites worksheet XML directly, so applying styles and
+// widths does not decode the full sheet into Excelize's normal-mode structures.
+func (r *excelReport) applyWorksheetMeta(stagePath string, states []worksheetState) error {
+	paths, err := worksheetPaths(stagePath)
+	if err != nil {
+		return err
 	}
-}
 
-func (r *excelReport) processWidthMeta() error {
-	for target, width := range r.meta.width {
-		target = normalizeTarget(target)
-		if colRe.MatchString(target) {
-			from, to := colRange(target)
-			if err := r.excel.SetColWidth(r.sheetName, from, to, boundedCellWidth(width)); err != nil {
-				return err
-			}
+	rules := make(map[string]patchRules)
+	for _, state := range states {
+		worksheetRules, err := worksheetPatchRulesForState(state)
+		if err != nil {
+			return err
 		}
+		if len(worksheetRules.Cols) == 0 && len(worksheetRules.Rows) == 0 &&
+			len(worksheetRules.Cells) == 0 && len(worksheetRules.CellRanges) == 0 &&
+			len(worksheetRules.Widths) == 0 {
+			continue
+		}
+		worksheetPath, ok := paths[state.SheetName]
+		if !ok {
+			return fmt.Errorf("worksheet %q not found in staged workbook", state.SheetName)
+		}
+		rules[worksheetPath] = worksheetRules
+	}
+	if len(rules) == 0 {
+		return nil
+	}
+
+	patchedPath := stagePath + ".styles"
+	if err := transformWorkbook(stagePath, patchedPath, rules); err != nil {
+		return err
+	}
+	if err := os.Rename(patchedPath, stagePath); err != nil {
+		os.Remove(patchedPath)
+		return err
 	}
 	return nil
 }
@@ -577,4 +625,20 @@ func colRange(target string) (from, to string) {
 		return f, t
 	}
 	return target, target
+}
+
+func columnSpan(target string) (from, to int, err error) {
+	fromName, toName := colRange(target)
+	from, err = excelize.ColumnNameToNumber(fromName)
+	if err != nil {
+		return 0, 0, err
+	}
+	to, err = excelize.ColumnNameToNumber(toName)
+	if err != nil {
+		return 0, 0, err
+	}
+	if from > to {
+		from, to = to, from
+	}
+	return from, to, nil
 }

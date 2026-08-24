@@ -28,7 +28,7 @@ Generate(outputPath, worksheets...) ──► .xlsx file
                           └── Translator (optional, localises headers and enum values)
 ```
 
-`Generate` either creates a new workbook or opens an existing one. Each worksheet with a `RowsReader` replaces its named sheet with fresh data; a nil reader preserves an existing named sheet while applying script-defined layout. All row data is streamed into one staged workbook, which is reopened for styles and widths before the final atomic replacement. If the target file does not exist it is created from scratch; if it exists, unrelated sheets are left untouched.
+`Generate` either creates a new workbook or opens an existing one. Each worksheet with a `RowsReader` replaces its named sheet with fresh data; a nil reader preserves an existing named sheet while applying script-defined layout. All row data is streamed into one staged workbook, which is patched for styles and widths before the final atomic replacement. If the target file does not exist it is created from scratch; if it exists, unrelated sheets are left untouched.
 
 ---
 

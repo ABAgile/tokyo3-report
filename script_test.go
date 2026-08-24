@@ -140,6 +140,13 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 				struct{ Name string }{"Alice"},
 			}),
 			expectedRows: [][]string{{"Name"}, {"Alice"}},
+			customValidation: func(t *testing.T, f *excelize.File) {
+				styleID, err := f.GetCellStyle("TestSheet", "A1")
+				assert.NoError(t, err)
+				style, err := f.GetStyle(styleID)
+				assert.NoError(t, err)
+				assert.True(t, style.Font.Bold)
+			},
 		},
 		{
 			name:       "Cell style",
@@ -155,6 +162,22 @@ col = {"Age": {"style": "{\"font\":{\"italic\":true}}"}}
 				style, err := f.GetStyle(styleID)
 				assert.NoError(t, err)
 				assert.True(t, style.Font.Bold)
+			},
+		},
+		{
+			name:       "Cell range style",
+			outputPath: "/tmp/test_cell_range_style.xlsx",
+			worksheet:  WorksheetConf{SheetName: "TestSheet", Script: `style = {"A1:B2": "{\"font\":{\"italic\":true}}"}`},
+			rowReader: NewStructRows([]any{
+				struct{ Name, Role string }{"Alice", "Dev"},
+			}),
+			expectedRows: [][]string{{"Name", "Role"}, {"Alice", "Dev"}},
+			customValidation: func(t *testing.T, f *excelize.File) {
+				styleID, err := f.GetCellStyle("TestSheet", "B2")
+				assert.NoError(t, err)
+				style, err := f.GetStyle(styleID)
+				assert.NoError(t, err)
+				assert.True(t, style.Font.Italic)
 			},
 		},
 		{
