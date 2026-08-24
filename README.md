@@ -220,12 +220,32 @@ style = {
 
 Each key selects a target; each value is the JSON serialisation of an [excelize Style](https://pkg.go.dev/github.com/xuri/excelize/v2#Style). Target type is inferred from the key format:
 
-| Key pattern | Example | Applied with |
+| Key pattern | Example | Target |
 |---|---|---|
-| Column letter(s) | `"A"`, `"A:C"` | `SetColStyle` |
-| Integer | `"1"`, `"3"` | `SetRowStyle` |
-| Cell reference | `"B2"` | `SetCellStyle` |
-| Cell range | `"B2:D10"` | `SetCellStyle` |
+| Column letter(s) | `"A"`, `"A:C"` | Whole column, plus every cell already in it |
+| Integer | `"1"`, `"3"` | Whole row, plus every cell already in it |
+| Cell reference | `"B2"` | Single cell |
+| Cell range | `"B2:D10"` | Every cell in the rectangle |
+
+Styles are written straight into the worksheet XML while the staged workbook is
+streamed, so a style never loads sheet data into memory.
+
+**Precedence** (first match wins): cell reference → cell range → row → column.
+A style replaces the target's existing style rather than merging with it, so a
+column or row style also overrides the automatic date format on `time.Time`
+cells in that column or row.
+
+**Row, cell and range targets create what they need.** Rows and cells that hold
+no data are written as empty styled elements so the style is visible in Excel,
+exactly as `SetCellStyle` would do. The cost is therefore proportional to the
+targeted area, not to the amount of data: `"B2:D10"` adds at most 27 cells, but
+`"A1:B1048576"` adds two million of them. To style a whole column, use a column
+target (`"A"`, `"A:B"`), which is a single `<col>` definition, instead of a range
+that spans every row.
+
+**A style that resolves to no formatting clears the target.** `'{}'`, and any
+style JSON excelize maps to its default style ID `0`, removes the style from the
+target instead of adding one.
 
 ### `col`
 
