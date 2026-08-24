@@ -146,7 +146,18 @@ func transformWorkbook(input, output string, rules map[string]patchRules) error 
 		return err
 	}
 
-	found := make(map[string]bool, len(targets))
+	// Validate every target before writing anything, so a bad rule fails
+	// before the output is built.
+	present := make(map[string]bool, len(zr.File))
+	for _, entry := range zr.File {
+		present[cleanZipPath(entry.Name)] = true
+	}
+	for path := range targets {
+		if !present[path] {
+			return fmt.Errorf("worksheet part not found: %s", path)
+		}
+	}
+
 	tmp, err := os.CreateTemp(filepath.Dir(output), ".xlsx-style-*")
 	if err != nil {
 		return err
@@ -172,7 +183,6 @@ func transformWorkbook(input, output string, rules map[string]patchRules) error 
 			}
 			continue
 		}
-		found[path] = true
 
 		header := entry.FileHeader
 		writer, err := zw.CreateHeader(&header)
@@ -193,11 +203,6 @@ func transformWorkbook(input, output string, rules map[string]patchRules) error 
 		}
 	}
 
-	for path := range targets {
-		if !found[path] {
-			return fmt.Errorf("worksheet part not found: %s", path)
-		}
-	}
 	if err := zw.Close(); err != nil {
 		return err
 	}
