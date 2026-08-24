@@ -61,7 +61,7 @@ style = {
 
 col = {
     "Revenue": {
-        "style": '{"num_fmt":4}',
+        "style": '{"NumFmt":4}',
     },
 }
 `

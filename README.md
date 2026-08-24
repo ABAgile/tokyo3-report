@@ -235,7 +235,7 @@ Per-column settings keyed by the **raw** field/column name (before any `Translat
 col = {
     "amount": {
         "width": 18,
-        "style": '{"num_fmt":4}',        # #,##0.00
+        "style": '{"NumFmt":4}',        # #,##0.00
     },
     "status": {
         "parser": "normalize_status",    # resolves WorksheetConf.Parsers entry
@@ -261,12 +261,12 @@ Style values are JSON representations of [`excelize.Style`](https://pkg.go.dev/g
 {
   "font":    { "bold": true, "italic": true, "size": 11, "color": "FF0000" },
   "fill":    { "type": "pattern", "pattern": 1, "color": ["FFFFCC"] },
-  "alignment": { "horizontal": "center", "wrap_text": true },
-  "num_fmt": 4    // built-in number format ID (4 = #,##0.00)
+  "alignment": { "horizontal": "center", "WrapText": true },
+  "NumFmt": 4    // built-in number format ID (4 = #,##0.00)
 }
 ```
 
-Common `num_fmt` IDs: `3` = `#,##0`, `4` = `#,##0.00`, `9` = `0%`, `10` = `0.00%`.
+Common `NumFmt` IDs: `3` = `#,##0`, `4` = `#,##0.00`, `9` = `0%`, `10` = `0.00%`.
 
 ---
 
