@@ -13,7 +13,7 @@ type scriptMeta struct {
 	groupFields []string
 }
 
-func (r *excelReport) runScript(script string) error {
+func (s *worksheetState) runScript() error {
 	meta := scriptMeta{
 		col:    make(map[string]map[string]any),
 		parser: make(map[int]Parser),
@@ -21,8 +21,8 @@ func (r *excelReport) runScript(script string) error {
 		width:  make(map[string]float64),
 	}
 
-	if script != "" {
-		globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, &starlark.Thread{}, "script.star", script, nil)
+	if s.Script != "" {
+		globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, &starlark.Thread{}, "script.star", s.Script, nil)
 		if err != nil {
 			return err
 		}
@@ -32,7 +32,7 @@ func (r *excelReport) runScript(script string) error {
 		parseGroupFieldsGlobal(globals, &meta)
 	}
 
-	r.meta = &meta
+	s.meta = &meta
 	return nil
 }
 
