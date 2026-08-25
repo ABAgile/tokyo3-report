@@ -171,11 +171,7 @@ func styleFixture(t *testing.T, count int) (string, string, []int) {
 		t.Fatal(err)
 	}
 
-	paths, err := worksheetPaths(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return path, paths["Data"], ids
+	return path, worksheetPart(t, path, "Data"), ids
 }
 
 func TestTransformWorksheetStylePrecedence(t *testing.T) {
@@ -184,7 +180,7 @@ func TestTransformWorksheetStylePrecedence(t *testing.T) {
 
 	output := filepath.Join(filepath.Dir(source), "out.xlsx")
 	if err := transformWorkbook(source, output, map[string]patchRules{
-		part: {
+		"Data": {
 			Styles: map[string]int{
 				"A2":    exact,
 				"A2:B3": ranged,
@@ -227,10 +223,10 @@ func TestTransformWorksheetStylePrecedence(t *testing.T) {
 }
 
 func TestTransformWorksheetRejectsInvalidCellRule(t *testing.T) {
-	source, part, ids := styleFixture(t, 1)
+	source, _, ids := styleFixture(t, 1)
 	output := filepath.Join(filepath.Dir(source), "out.xlsx")
 	err := transformWorkbook(source, output, map[string]patchRules{
-		part: {Styles: map[string]int{"NOPE": ids[0]}},
+		"Data": {Styles: map[string]int{"NOPE": ids[0]}},
 	})
 	if err == nil {
 		t.Fatal("expected an error for an invalid cell reference")
@@ -301,6 +297,25 @@ func TestTransformWorksheetCopiesEmptySheetData(t *testing.T) {
 	if got, err := book.GetColWidth("Data", "A"); err != nil || got != 30 {
 		t.Errorf("column A width = %v (err %v), want 30", got, err)
 	}
+}
+
+// worksheetPart resolves the worksheet XML part of one sheet name.
+func worksheetPart(t *testing.T, path, sheet string) string {
+	t.Helper()
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	paths, err := sheetPartPaths(&zr.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, ok := paths[sheet]
+	if !ok {
+		t.Fatalf("sheet %q not found in %s", sheet, path)
+	}
+	return part
 }
 
 func worksheetXML(t *testing.T, path, part string) string {

@@ -16,6 +16,8 @@ type streamStyler struct {
 	rules       preparedRules
 	dateStyleID int
 	lastRow     int
+	// values is reused across rows; SetRow writes it out and does not retain it.
+	values []any
 }
 
 func newStreamStyler(book *excelize.File, styleIDs map[string]int) (*streamStyler, error) {
@@ -94,7 +96,10 @@ func (s *streamStyler) styleRow(row int, fields []any) ([]any, []excelize.RowOpt
 		return nil, opts
 	}
 
-	values := make([]any, width)
+	if cap(s.values) < width {
+		s.values = make([]any, width)
+	}
+	values := s.values[:width]
 	next := 0
 	for col := range width {
 		var field any

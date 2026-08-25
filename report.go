@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -163,22 +164,13 @@ func (r *excelReport) saveWorkbook(states []worksheetState) (err error) {
 // applyWorksheetMeta rewrites worksheet XML directly, so applying styles and
 // widths does not decode the full sheet into Excelize's normal-mode structures.
 func (r *excelReport) applyWorksheetMeta(stagePath string, states []worksheetState) error {
-	paths, err := worksheetPaths(stagePath)
-	if err != nil {
-		return err
-	}
-
 	rules := make(map[string]patchRules)
 	for _, state := range states {
 		worksheetRules := state.worksheetPatchRules()
 		if worksheetRules.empty() {
 			continue
 		}
-		worksheetPath, ok := paths[state.SheetName]
-		if !ok {
-			return fmt.Errorf("worksheet %q not found in staged workbook", state.SheetName)
-		}
-		rules[worksheetPath] = worksheetRules
+		rules[state.SheetName] = worksheetRules
 	}
 	if len(rules) == 0 {
 		return nil
@@ -343,7 +335,7 @@ func (s *worksheetState) prepareHeaders() ([]any, map[string]int, []int, error) 
 			headers[i] = flect.Titleize(hdr)
 		}
 		headerIndices[hdr] = i
-		fieldWidths[i] = calcCellWidth(fmt.Sprint(headers[i]))
+		fieldWidths[i] = valueWidth(headers[i], nil)
 	}
 	return headers, headerIndices, fieldWidths, nil
 }
@@ -357,12 +349,12 @@ func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, rowReader 
 			return err
 		}
 
-		for colIdx, fn := range s.meta.parser {
-			result, err := fn(fields[colIdx])
+		for _, parser := range s.meta.parsers {
+			result, err := parser.fn(fields[parser.col])
 			if err != nil {
 				return fmt.Errorf("row %d: %w", rowIdx, err)
 			}
-			fields[colIdx] = result
+			fields[parser.col] = result
 		}
 
 		if lastRow != nil {
@@ -394,16 +386,43 @@ func (s *worksheetState) insertGroupBreaks(stream *excelize.StreamWriter, styler
 }
 
 func trackFieldWidths(fields []any, fieldWidths []int) {
+	// The scratch buffer keeps number and date formatting allocation free.
+	var scratch [64]byte
+	buf := scratch[:0]
 	for col, width := range fieldWidths {
-		var str string
-		if t, ok := fields[col].(time.Time); ok {
-			str = t.Format(time.RFC3339)
-		} else {
-			str = fmt.Sprintf("%v", fields[col])
-		}
-		if w := calcCellWidth(str); w > width {
+		if w := valueWidth(fields[col], buf); w > width {
 			fieldWidths[col] = w
 		}
+	}
+}
+
+// valueWidth is the display width of one cell value. The common scalar kinds
+// are measured without going through fmt, which dominated the row loop.
+func valueWidth(value any, buf []byte) int {
+	switch v := value.(type) {
+	case nil:
+		return len("<nil>") // fmt renders a nil value this way
+	case string:
+		return calcCellWidth(v)
+	case time.Time:
+		return len(v.AppendFormat(buf, time.RFC3339))
+	case bool:
+		if v {
+			return len("true")
+		}
+		return len("false")
+	case int:
+		return len(strconv.AppendInt(buf, int64(v), 10))
+	case int64:
+		return len(strconv.AppendInt(buf, v, 10))
+	case int32:
+		return len(strconv.AppendInt(buf, int64(v), 10))
+	case float64:
+		return len(strconv.AppendFloat(buf, v, 'g', -1, 64))
+	case float32:
+		return len(strconv.AppendFloat(buf, float64(v), 'g', -1, 32))
+	default:
+		return calcCellWidth(fmt.Sprintf("%v", value))
 	}
 }
 
@@ -430,7 +449,7 @@ func (s *worksheetState) processColumnMeta(headerIndices map[string]int) error {
 		}
 		lookupKey, hasLookup := m["lookup"].(string)
 		if hasParser || hasLookup {
-			s.meta.parser[colIdx] = func(arg any) (any, error) {
+			s.meta.setParser(colIdx, func(arg any) (any, error) {
 				if hasParser {
 					parsed, err := parser(arg)
 					if err != nil {
@@ -442,7 +461,7 @@ func (s *worksheetState) processColumnMeta(headerIndices map[string]int) error {
 					arg = s.Translator.Lookup(lookupKey, arg)
 				}
 				return arg, nil
-			}
+			})
 		}
 	}
 	return nil

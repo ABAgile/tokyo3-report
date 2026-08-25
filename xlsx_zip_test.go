@@ -36,13 +36,9 @@ func TestTransformWorkbookPatchesStylesAndKeepsMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	paths, err := worksheetPaths(source)
-	if err != nil {
-		t.Fatal(err)
-	}
 	output := filepath.Join(dir, "output.xlsx")
 	if err := transformWorkbook(source, output, map[string]patchRules{
-		paths["Data"]: {
+		"Data": {
 			Styles: map[string]int{"1": styleID, "B2": styleID},
 			Widths: map[string]float64{"A:B": 42},
 		},
@@ -77,7 +73,7 @@ func TestTransformWorkbookPatchesStylesAndKeepsMode(t *testing.T) {
 	}
 }
 
-func TestTransformWorkbookRejectsUnknownPart(t *testing.T) {
+func TestTransformWorkbookRejectsUnknownSheet(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.xlsx")
 	if err := Generate(source, WorksheetConf{
@@ -88,10 +84,10 @@ func TestTransformWorkbookRejectsUnknownPart(t *testing.T) {
 	}
 	output := filepath.Join(dir, "output.xlsx")
 	err := transformWorkbook(source, output, map[string]patchRules{
-		"xl/worksheets/missing.xml": {Styles: map[string]int{"1": 1}},
+		"Missing": {Styles: map[string]int{"1": 1}},
 	})
 	if err == nil {
-		t.Fatal("expected an error for a missing worksheet part")
+		t.Fatal("expected an error for a missing worksheet")
 	}
 	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
 		t.Errorf("output should not exist, stat error: %v", statErr)

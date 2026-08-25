@@ -15,7 +15,8 @@ import (
 // part keeps its compressed bytes.
 
 // transformWorkbook rewrites the selected worksheet parts in one ZIP pass.
-// Rules are keyed by worksheet part path, e.g. xl/worksheets/sheet1.xml.
+// Rules are keyed by workbook sheet name; the matching worksheet part is
+// resolved from the same archive reader, so the staged file is opened once.
 // The worksheet XML is token-streamed; it is never accumulated in memory, and
 // every other part is copied still compressed. The output keeps the input's
 // file mode.
@@ -23,13 +24,10 @@ func transformWorkbook(input, output string, rules map[string]patchRules) error 
 	if len(rules) == 0 {
 		return fmt.Errorf("no worksheet rules supplied")
 	}
-
-	targets := make(map[string]patchRules, len(rules))
-	for path, rule := range rules {
-		if path == "" {
-			return fmt.Errorf("worksheet part path is required")
+	for sheet := range rules {
+		if sheet == "" {
+			return fmt.Errorf("worksheet name is required")
 		}
-		targets[cleanZipPath(path)] = rule
 	}
 
 	in, err := os.Open(input)
@@ -49,17 +47,20 @@ func transformWorkbook(input, output string, rules map[string]patchRules) error 
 
 	// Validate every target before writing anything, so a bad rule fails
 	// before the output is built.
+	paths, err := sheetPartPaths(zr)
+	if err != nil {
+		return err
+	}
 	present := make(map[string]bool, len(zr.File))
 	for _, entry := range zr.File {
 		present[cleanZipPath(entry.Name)] = true
 	}
-	for path := range targets {
-		if !present[path] {
-			return fmt.Errorf("worksheet part not found: %s", path)
+	compiledTargets := make(map[string]compiledPatchRules, len(rules))
+	for sheet, spec := range rules {
+		path, ok := paths[sheet]
+		if !ok || !present[path] {
+			return fmt.Errorf("worksheet %q not found in workbook", sheet)
 		}
-	}
-	compiledTargets := make(map[string]compiledPatchRules, len(targets))
-	for path, spec := range targets {
 		compiled, err := compilePatchRules(spec)
 		if err != nil {
 			return err
@@ -128,23 +129,10 @@ func transformWorkbook(input, output string, rules map[string]patchRules) error 
 	return nil
 }
 
-// worksheetPaths resolves workbook sheet names to their worksheet XML parts
-// through workbook.xml and its relationships file.
-func worksheetPaths(filename string) (map[string]string, error) {
-	in, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer in.Close()
-	stat, err := in.Stat()
-	if err != nil {
-		return nil, err
-	}
-	zr, err := zip.NewReader(in, stat.Size())
-	if err != nil {
-		return nil, err
-	}
-
+// sheetPartPaths resolves workbook sheet names to their worksheet XML parts
+// through workbook.xml and its relationships file. It reuses an open archive
+// reader so the caller does not have to reopen the workbook.
+func sheetPartPaths(zr *zip.Reader) (map[string]string, error) {
 	var workbook struct {
 		Sheets struct {
 			Sheet []struct {

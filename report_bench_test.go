@@ -1,10 +1,14 @@
 package report
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/jmoiron/sqlx"
 )
 
 type benchRows struct {
@@ -67,4 +71,54 @@ func BenchmarkGenerateRowStyle(b *testing.B) {
 style = {"1": "{\"font\":{\"bold\":true}}", "B2": "{\"font\":{\"italic\":true}}"}
 width = {"A": 20.0}
 `)
+}
+
+// trackFieldWidths and the row readers run once per row, so they are measured
+// separately from the whole-report benchmarks above.
+func BenchmarkTrackFieldWidths(b *testing.B) {
+	rows := &benchRows{n: 1, cols: 12}
+	rows.Next()
+	fields, err := rows.Values()
+	if err != nil {
+		b.Fatal(err)
+	}
+	widths := make([]int, len(fields))
+	b.ReportAllocs()
+	for b.Loop() {
+		trackFieldWidths(fields, widths)
+	}
+}
+
+func BenchmarkSqlxRowsValues(b *testing.B) {
+	const cols, rowCount = 12, 2000
+	names := make([]string, cols)
+	for i := range names {
+		names[i] = fmt.Sprintf("col_%d", i)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			b.Fatal(err)
+		}
+		rows := sqlmock.NewRows(names)
+		for r := range rowCount {
+			values := make([]driver.Value, cols)
+			for c := range values {
+				values[c] = fmt.Sprintf("v%d-%d", r, c)
+			}
+			rows.AddRow(values...)
+		}
+		mock.ExpectQuery("SELECT").WillReturnRows(rows)
+		reader := NewSqlxRows("SELECT 1", sqlx.NewDb(db, "sqlmock"))
+		if err := reader.Read(); err != nil {
+			b.Fatal(err)
+		}
+		for reader.Next() {
+			if _, err := reader.Values(); err != nil {
+				b.Fatal(err)
+			}
+		}
+		db.Close()
+	}
 }

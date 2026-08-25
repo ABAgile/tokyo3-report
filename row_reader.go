@@ -80,6 +80,13 @@ type SqlxRows struct {
 	db          *sqlx.DB
 	rows        *sqlx.Rows
 	columnTypes []*sql.ColumnType
+	// numeric marks the columns whose text form has to be parsed as a float.
+	// It is resolved once instead of per cell of every row.
+	numeric []bool
+	// scratch receives each scan and dest holds pointers into it, so only the
+	// returned slice is allocated per row.
+	scratch []any
+	dest    []any
 }
 
 func NewSqlxRows(query string, db *sqlx.DB) *SqlxRows {
@@ -100,6 +107,15 @@ func (r *SqlxRows) Read() error {
 	if r.columnTypes, err = r.rows.ColumnTypes(); err != nil {
 		return err
 	}
+	r.numeric = make([]bool, len(r.columnTypes))
+	for i, columnType := range r.columnTypes {
+		r.numeric[i] = columnType.DatabaseTypeName() == "NUMERIC"
+	}
+	r.scratch = make([]any, len(r.columnTypes))
+	r.dest = make([]any, len(r.columnTypes))
+	for i := range r.dest {
+		r.dest[i] = &r.scratch[i]
+	}
 	return nil
 }
 
@@ -107,13 +123,19 @@ func (r *SqlxRows) Values() ([]any, error) {
 	if r.rows == nil {
 		return nil, sql.ErrNoRows
 	}
-	vals, err := r.rows.SliceScan()
-	if err != nil {
+	if err := r.rows.Scan(r.dest...); err != nil {
 		return nil, err
 	}
+	// The caller keeps the previous row for group breaks, so every row needs
+	// its own slice; only the scan destinations are reused.
+	vals := make([]any, len(r.scratch))
+	copy(vals, r.scratch)
 	for i, val := range vals {
-		if val != nil && r.columnTypes[i].DatabaseTypeName() == "NUMERIC" {
-			if f, err := strconv.ParseFloat(val.(string), 64); err == nil {
+		if val == nil || !r.numeric[i] {
+			continue
+		}
+		if text, ok := val.(string); ok {
+			if f, err := strconv.ParseFloat(text, 64); err == nil {
 				vals[i] = f
 			}
 		}

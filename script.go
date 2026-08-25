@@ -6,19 +6,37 @@ import (
 )
 
 type scriptMeta struct {
-	col         map[string]map[string]any
-	parser      map[int]Parser
+	col map[string]map[string]any
+	// parsers is a slice, not a map, so the row loop iterates it without map
+	// overhead and applies columns in a stable order.
+	parsers     []colParser
 	style       map[string]string
 	width       map[string]float64
 	groupFields []string
 }
 
+type colParser struct {
+	col int
+	fn  Parser
+}
+
+// setParser registers the parser of one zero-based column, replacing any
+// parser already registered for it.
+func (m *scriptMeta) setParser(col int, fn Parser) {
+	for i := range m.parsers {
+		if m.parsers[i].col == col {
+			m.parsers[i].fn = fn
+			return
+		}
+	}
+	m.parsers = append(m.parsers, colParser{col: col, fn: fn})
+}
+
 func (s *worksheetState) runScript() error {
 	meta := scriptMeta{
-		col:    make(map[string]map[string]any),
-		parser: make(map[int]Parser),
-		style:  make(map[string]string),
-		width:  make(map[string]float64),
+		col:   make(map[string]map[string]any),
+		style: make(map[string]string),
+		width: make(map[string]float64),
 	}
 
 	if s.Script != "" {
