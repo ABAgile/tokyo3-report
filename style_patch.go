@@ -1,15 +1,8 @@
 package report
 
 import (
-	"archive/zip"
 	"encoding/xml"
-	"fmt"
 	"io"
-	"maps"
-	"os"
-	pathpkg "path"
-	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -18,60 +11,10 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-// Style IDs are zero-based indexes into xl/styles.xml/cellXfs/xf.
-// The IDs must already exist in the workbook's styles.xml.
-type styleSpan struct {
-	Min, Max int
-	StyleID  int
-}
-
-type widthSpan struct {
-	Min, Max int
-	Width    float64
-}
-
-type cellSpan struct {
-	FromCol, ToCol int
-	FromRow, ToRow int
-	StyleID        int
-}
-
-// patchRules mirrors the worksheet-level style and width metadata after
-// workbook styles have been assigned, but before targets are compiled into
-// numeric XML ranges.
-type patchRules struct {
-	Styles      map[string]int     // target -> workbook style ID
-	Widths      map[string]float64 // column target -> explicit width
-	FieldWidths []int              // auto-sized content widths by zero-based column
-	// SheetDataStyled marks worksheets whose cells were already styled while
-	// their rows were streamed, leaving only <cols> to patch.
-	SheetDataStyled bool
-}
-
-func (r patchRules) empty() bool {
-	return len(r.Styles) == 0 && len(r.Widths) == 0 && len(r.FieldWidths) == 0
-}
-
-// compiledPatchRules contains the numeric ranges consumed by the worksheet
-// XML transformer.
-type compiledPatchRules struct {
-	// Exact cell rules always win.
-	Cells      map[string]int // e.g. "B4": 7
-	CellRanges []cellSpan
-	Rows       []styleSpan // Excel row numbers, inclusive
-	Cols       []styleSpan // Excel column numbers, inclusive; A=1
-	Widths     []widthSpan // Excel column widths, inclusive; A=1
-
-	SheetDataStyled bool
-}
-
-const (
-	styleTargetCol = iota
-	styleTargetRow
-	styleTargetCell
-)
-
-var colRe = regexp.MustCompile(`^[A-Z]+(:[A-Z]+)?$`)
+// This file patches styles and widths into an already written worksheet part by
+// streaming its XML tokens. It serves worksheets that have no RowsReader, and
+// the <cols> element of every worksheet. Worksheets with rows get their cell
+// styles from style_stream.go instead.
 
 // These types are used only for the small <cols> element. The worksheet's
 // <sheetData> is never accumulated in memory.
@@ -84,163 +27,6 @@ type rawCols struct {
 type rawCol struct {
 	XMLName xml.Name
 	Attrs   []xml.Attr `xml:",any,attr"`
-}
-
-type styledCell struct {
-	col     int
-	styleID int
-}
-
-func styleTargetKind(target string) int {
-	if colRe.MatchString(target) {
-		return styleTargetCol
-	}
-	if _, err := strconv.Atoi(target); err == nil {
-		return styleTargetRow
-	}
-	return styleTargetCell
-}
-
-func boundedCellWidth(width float64) float64 {
-	return max(min(width, 100.0), 10.0)
-}
-
-func normalizeTarget(target string) string {
-	return strings.TrimSpace(strings.ToUpper(target))
-}
-
-// colRange splits a colon-separated column range (e.g. "A:C") into its two
-// endpoints. A single column name is returned as both endpoints unchanged.
-func colRange(target string) (from, to string) {
-	if f, t, ok := strings.Cut(target, ":"); ok {
-		return f, t
-	}
-	return target, target
-}
-
-func columnSpan(target string) (from, to int, err error) {
-	fromName, toName := colRange(target)
-	from, err = excelize.ColumnNameToNumber(fromName)
-	if err != nil {
-		return 0, 0, err
-	}
-	to, err = excelize.ColumnNameToNumber(toName)
-	if err != nil {
-		return 0, 0, err
-	}
-	if from > to {
-		from, to = to, from
-	}
-	return from, to, nil
-}
-
-func compilePatchRules(spec patchRules) (compiledPatchRules, error) {
-	rules := compiledPatchRules{
-		Cells:           make(map[string]int),
-		SheetDataStyled: spec.SheetDataStyled,
-	}
-	for target, styleID := range spec.Styles {
-		target = normalizeTarget(target)
-		switch styleTargetKind(target) {
-		case styleTargetCol:
-			fromCol, toCol, err := columnSpan(target)
-			if err != nil {
-				return compiledPatchRules{}, err
-			}
-			rules.Cols = append(rules.Cols, styleSpan{Min: fromCol, Max: toCol, StyleID: styleID})
-		case styleTargetRow:
-			row, err := strconv.Atoi(target)
-			if err != nil || row < 1 || row > excelize.TotalRows {
-				return compiledPatchRules{}, fmt.Errorf("invalid style row %q", target)
-			}
-			rules.Rows = append(rules.Rows, styleSpan{Min: row, Max: row, StyleID: styleID})
-		case styleTargetCell:
-			from, to := colRange(target)
-			fromCol, fromRow, err := excelize.CellNameToCoordinates(from)
-			if err != nil {
-				return compiledPatchRules{}, err
-			}
-			toCol, toRow, err := excelize.CellNameToCoordinates(to)
-			if err != nil {
-				return compiledPatchRules{}, err
-			}
-			if fromCol > toCol {
-				fromCol, toCol = toCol, fromCol
-			}
-			if fromRow > toRow {
-				fromRow, toRow = toRow, fromRow
-			}
-			if fromCol == toCol && fromRow == toRow {
-				rules.Cells[normalCellRef(from)] = styleID
-			} else {
-				rules.CellRanges = append(rules.CellRanges, cellSpan{
-					FromCol: fromCol,
-					ToCol:   toCol,
-					FromRow: fromRow,
-					ToRow:   toRow,
-					StyleID: styleID,
-				})
-			}
-		}
-	}
-
-	// Auto-sized widths are the baseline; explicit width metadata is appended
-	// afterward so it overrides the automatic value.
-	for colIdx, width := range spec.FieldWidths {
-		if _, err := excelize.ColumnNumberToName(colIdx + 1); err != nil {
-			return compiledPatchRules{}, err
-		}
-		rules.Widths = append(rules.Widths, widthSpan{
-			Min:   colIdx + 1,
-			Max:   colIdx + 1,
-			Width: boundedCellWidth(float64(width) * 1.123),
-		})
-	}
-	for target, width := range spec.Widths {
-		target = normalizeTarget(target)
-		if !colRe.MatchString(target) {
-			continue
-		}
-		fromCol, toCol, err := columnSpan(target)
-		if err != nil {
-			return compiledPatchRules{}, err
-		}
-		rules.Widths = append(rules.Widths, widthSpan{
-			Min:   fromCol,
-			Max:   toCol,
-			Width: boundedCellWidth(width),
-		})
-	}
-	return rules, nil
-}
-
-// preparedRules indexes the rules of one worksheet so the streaming pass never
-// parses a cell reference or scans the exact-cell rules once per row.
-type preparedRules struct {
-	compiledPatchRules
-	cellRows  map[int][]styledCell // exact cell styles per row, ascending column
-	cellRowNo []int                // sorted rows present in cellRows
-}
-
-func prepareRules(rules compiledPatchRules) (preparedRules, error) {
-	prepared := preparedRules{compiledPatchRules: rules}
-	if len(rules.Cells) == 0 {
-		return prepared, nil
-	}
-	prepared.cellRows = make(map[int][]styledCell, len(rules.Cells))
-	for ref, styleID := range rules.Cells {
-		col, row, err := excelize.CellNameToCoordinates(normalCellRef(ref))
-		if err != nil {
-			return preparedRules{}, fmt.Errorf("invalid cell reference %q: %w", ref, err)
-		}
-		prepared.cellRows[row] = append(prepared.cellRows[row], styledCell{col: col, styleID: styleID})
-	}
-	for row, cells := range prepared.cellRows {
-		slices.SortFunc(cells, func(a, b styledCell) int { return a.col - b.col })
-		prepared.cellRowNo = append(prepared.cellRowNo, row)
-	}
-	sort.Ints(prepared.cellRowNo)
-	return prepared, nil
 }
 
 // encoding/xml resolves namespace prefixes to namespace URLs while decoding.
@@ -263,205 +49,6 @@ func newNamespaceState() *namespaceState {
 		},
 		declared: make(map[string]bool),
 	}
-}
-
-// transformWorkbook rewrites the selected worksheet parts in one ZIP pass.
-// Rules are keyed by worksheet part path, e.g. xl/worksheets/sheet1.xml.
-// The worksheet XML is token-streamed; it is never accumulated in memory, and
-// every other part is copied still compressed. The output keeps the input's
-// file mode.
-func transformWorkbook(input, output string, rules map[string]patchRules) error {
-	if len(rules) == 0 {
-		return fmt.Errorf("no worksheet rules supplied")
-	}
-
-	targets := make(map[string]patchRules, len(rules))
-	for path, rule := range rules {
-		if path == "" {
-			return fmt.Errorf("worksheet part path is required")
-		}
-		targets[cleanZipPath(path)] = rule
-	}
-
-	in, err := os.Open(input)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	stat, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	zr, err := zip.NewReader(in, stat.Size())
-	if err != nil {
-		return err
-	}
-
-	// Validate every target before writing anything, so a bad rule fails
-	// before the output is built.
-	present := make(map[string]bool, len(zr.File))
-	for _, entry := range zr.File {
-		present[cleanZipPath(entry.Name)] = true
-	}
-	for path := range targets {
-		if !present[path] {
-			return fmt.Errorf("worksheet part not found: %s", path)
-		}
-	}
-	compiledTargets := make(map[string]compiledPatchRules, len(targets))
-	for path, spec := range targets {
-		compiled, err := compilePatchRules(spec)
-		if err != nil {
-			return err
-		}
-		compiledTargets[path] = compiled
-	}
-
-	tmp, err := os.CreateTemp(filepath.Dir(output), ".xlsx-style-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	ok := false
-	defer func() {
-		tmp.Close()
-		if !ok {
-			os.Remove(tmpName)
-		}
-	}()
-
-	zw := zip.NewWriter(tmp)
-	for _, entry := range zr.File {
-		path := cleanZipPath(entry.Name)
-		rule, patched := compiledTargets[path]
-		if !patched {
-			// Untouched parts keep their compressed bytes: no inflate,
-			// no deflate, and no buffering of the part contents.
-			if err := zw.Copy(entry); err != nil {
-				return err
-			}
-			continue
-		}
-
-		header := entry.FileHeader
-		writer, err := zw.CreateHeader(&header)
-		if err != nil {
-			return err
-		}
-		rc, err := entry.Open()
-		if err != nil {
-			return err
-		}
-		err = transformWorksheet(rc, writer, rule)
-		closeErr := rc.Close()
-		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-	}
-
-	if err := zw.Close(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, stat.Mode().Perm()); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, output); err != nil {
-		return err
-	}
-	ok = true
-	return nil
-}
-
-// worksheetPaths resolves workbook sheet names to their worksheet XML parts
-// through workbook.xml and its relationships file.
-func worksheetPaths(filename string) (map[string]string, error) {
-	in, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer in.Close()
-	stat, err := in.Stat()
-	if err != nil {
-		return nil, err
-	}
-	zr, err := zip.NewReader(in, stat.Size())
-	if err != nil {
-		return nil, err
-	}
-
-	var workbook struct {
-		Sheets struct {
-			Sheet []struct {
-				Name  string `xml:"name,attr"`
-				RelID string `xml:"id,attr"`
-			} `xml:"sheet"`
-		} `xml:"sheets"`
-	}
-	var rels struct {
-		Relationships []struct {
-			ID     string `xml:"Id,attr"`
-			Target string `xml:"Target,attr"`
-		} `xml:"Relationship"`
-	}
-	for _, entry := range zr.File {
-		switch cleanZipPath(entry.Name) {
-		case "xl/workbook.xml":
-			if err := decodeZipXML(entry, &workbook); err != nil {
-				return nil, err
-			}
-		case "xl/_rels/workbook.xml.rels":
-			if err := decodeZipXML(entry, &rels); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	relTargets := make(map[string]string, len(rels.Relationships))
-	for _, rel := range rels.Relationships {
-		target := strings.ReplaceAll(rel.Target, "\\", "/")
-		if trimmed, ok := strings.CutPrefix(target, "/"); ok {
-			target = trimmed
-		} else if !strings.HasPrefix(target, "xl/") {
-			target = pathpkg.Join("xl", target)
-		}
-		relTargets[rel.ID] = cleanZipPath(target)
-	}
-
-	paths := make(map[string]string, len(workbook.Sheets.Sheet))
-	for _, sheet := range workbook.Sheets.Sheet {
-		if path, ok := relTargets[sheet.RelID]; ok {
-			paths[sheet.Name] = path
-		}
-	}
-	return paths, nil
-}
-
-func decodeZipXML(entry *zip.File, dst any) error {
-	rc, err := entry.Open()
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
-	return xml.NewDecoder(rc).Decode(dst)
-}
-
-// sheetDataUntouched reports whether the rules change nothing inside
-// <sheetData>. Column widths and column styles live in <cols>, which precedes
-// <sheetData>, so such worksheets can be copied verbatim from that point on.
-// Column styles also fall back to <cols> alone once the cells carry their
-// styles from the streamed write.
-func (p preparedRules) sheetDataUntouched() bool {
-	if len(p.Rows) != 0 || len(p.Cells) != 0 || len(p.CellRanges) != 0 {
-		return false
-	}
-	return p.SheetDataStyled || len(p.Cols) == 0
 }
 
 // tailCapture records the bytes read from the worksheet part so a bail-out can
@@ -695,39 +282,6 @@ func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) 
 	return enc.Flush()
 }
 
-// nextStyledRow finds the first row after the given one that must be
-// materialized because a row or cell style targets it.
-func (p preparedRules) nextStyledRow(after int) (int, bool) {
-	if after >= excelize.TotalRows {
-		return 0, false
-	}
-	next := excelize.TotalRows + 1
-	consider := func(row int) {
-		if row > after && row < next && row <= excelize.TotalRows {
-			next = row
-		}
-	}
-	for _, span := range p.Rows {
-		row := max(span.Min, after+1)
-		if row <= span.Max {
-			consider(row)
-		}
-	}
-	for _, span := range p.CellRanges {
-		row := max(span.FromRow, after+1)
-		if row <= span.ToRow {
-			consider(row)
-		}
-	}
-	if i := sort.SearchInts(p.cellRowNo, after+1); i < len(p.cellRowNo) {
-		consider(p.cellRowNo[i])
-	}
-	if next > excelize.TotalRows {
-		return 0, false
-	}
-	return next, true
-}
-
 func writeStyledRow(enc *xml.Encoder, ns *namespaceState, rules preparedRules, row int) error {
 	attrs := []xml.Attr{{Name: xml.Name{Local: "r"}, Value: strconv.Itoa(row)}}
 	if style, ok := spanStyle(rules.Rows, row); ok {
@@ -746,42 +300,6 @@ func writeStyledRow(enc *xml.Encoder, ns *namespaceState, rules preparedRules, r
 		return err
 	}
 	return enc.EncodeToken(xml.EndElement{Name: normalizeName(start.End().Name, ns)})
-}
-
-// styledCells lists the styles a row needs from exact cell and cell-range
-// rules, in ascending column order. It is the single place that resolves their
-// precedence: exact cells win over ranges, and later ranges win over earlier
-// ones.
-func (p preparedRules) styledCells(row int) []styledCell {
-	exact := p.cellRows[row]
-	ranged := false
-	for _, rule := range p.CellRanges {
-		if rule.FromRow <= row && row <= rule.ToRow {
-			ranged = true
-			break
-		}
-	}
-	if !ranged {
-		return exact
-	}
-
-	styles := make(map[int]int)
-	for _, rule := range p.CellRanges {
-		if rule.FromRow > row || row > rule.ToRow {
-			continue
-		}
-		for col := rule.FromCol; col <= rule.ToCol; col++ {
-			styles[col] = rule.StyleID
-		}
-	}
-	for _, cell := range exact {
-		styles[cell.col] = cell.styleID
-	}
-	cells := make([]styledCell, 0, len(styles))
-	for _, col := range slices.Sorted(maps.Keys(styles)) {
-		cells = append(cells, styledCell{col: col, styleID: styles[col]})
-	}
-	return cells
 }
 
 func writeCellsBefore(enc *xml.Encoder, ns *namespaceState, row int, cells []styledCell, index *int, beforeCol int) error {
@@ -905,24 +423,6 @@ func (ns *namespaceState) prefix(namespace string) string {
 	}
 }
 
-// rowOrColStyle is the fallback for cells that no exact cell or cell-range
-// rule targets. Row rules win over column rules, as in Excel.
-func rowOrColStyle(rules compiledPatchRules, row, col int) (int, bool) {
-	if id, ok := spanStyle(rules.Rows, row); ok {
-		return id, true
-	}
-	return spanStyle(rules.Cols, col)
-}
-
-func spanStyle(spans []styleSpan, value int) (int, bool) {
-	for _, span := range slices.Backward(spans) { // last rule wins
-		if span.Min <= value && value <= span.Max {
-			return span.StyleID, true
-		}
-	}
-	return 0, false
-}
-
 // rewriteCols splits the existing <col> definitions at every rule boundary so
 // each emitted range carries at most one style and width, and adds definitions
 // for targeted columns that had no <col> entry at all.
@@ -978,15 +478,6 @@ func rewriteCols(input []rawCol, styleRules []styleSpan, widthRules []widthSpan)
 		output = append(output, col)
 	}
 	return output
-}
-
-func spanWidth(spans []widthSpan, value int) (float64, bool) {
-	for _, span := range slices.Backward(spans) {
-		if span.Min <= value && value <= span.Max {
-			return span.Width, true
-		}
-	}
-	return 0, false
 }
 
 func coveringCol(cols []rawCol, column int) (rawCol, bool) {
@@ -1089,14 +580,6 @@ func columnFromRef(ref string) int {
 		result = result*26 + int(r-'A'+1)
 	}
 	return result
-}
-
-func normalCellRef(ref string) string {
-	return strings.ToUpper(strings.ReplaceAll(ref, "$", ""))
-}
-
-func cleanZipPath(name string) string {
-	return pathpkg.Clean(strings.ReplaceAll(name, "\\", "/"))
 }
 
 func uniqueInts(values []int) []int {
