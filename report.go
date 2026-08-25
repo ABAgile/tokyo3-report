@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,14 +18,6 @@ const (
 	DefaultSheetName          = "Sheet1"
 	OpenXMLShortDateFmtDateId = 14
 )
-
-const (
-	styleTargetCol = iota
-	styleTargetRow
-	styleTargetCell
-)
-
-var colRe = regexp.MustCompile(`^[A-Z]+(:[A-Z]+)?$`)
 
 // Translator supplies display strings for header names and enum-mapped values.
 // A nil Translator is valid; headers fall back to flect.Titleize and values pass through unchanged.
@@ -179,13 +169,8 @@ func (r *excelReport) applyWorksheetMeta(stagePath string, states []worksheetSta
 
 	rules := make(map[string]patchRules)
 	for _, state := range states {
-		worksheetRules, err := state.worksheetPatchRules()
-		if err != nil {
-			return err
-		}
-		if len(worksheetRules.Cols) == 0 && len(worksheetRules.Rows) == 0 &&
-			len(worksheetRules.Cells) == 0 && len(worksheetRules.CellRanges) == 0 &&
-			len(worksheetRules.Widths) == 0 {
+		worksheetRules := state.worksheetPatchRules()
+		if worksheetRules.empty() {
 			continue
 		}
 		worksheetPath, ok := paths[state.SheetName]
@@ -467,18 +452,8 @@ func (s *worksheetState) processColumnMeta(headerIndices map[string]int) error {
 	return nil
 }
 
-func styleTargetKind(target string) int {
-	if colRe.MatchString(target) {
-		return styleTargetCol
-	}
-	if _, err := strconv.Atoi(target); err == nil {
-		return styleTargetRow
-	}
-	return styleTargetCell
-}
-
 // processStyleMeta parses script styles and creates workbook-wide IDs. The IDs
-// are consumed by worksheetPatchRules when building XML patch rules.
+// are carried into patchRules and compiled into XML rules before patching.
 func (s *worksheetState) processStyleMeta() error {
 	styleIDs := make(map[string]int, len(s.meta.style))
 	for target, styleJSON := range s.meta.style {
@@ -497,85 +472,15 @@ func (s *worksheetState) processStyleMeta() error {
 	return nil
 }
 
-func (s *worksheetState) worksheetPatchRules() (patchRules, error) {
+func (s *worksheetState) worksheetPatchRules() patchRules {
 	rules := patchRules{
-		Cells: make(map[string]int),
-	}
-	for target, styleID := range s.styleIDs {
-		target = normalizeTarget(target)
-		switch styleTargetKind(target) {
-		case styleTargetCol:
-			fromCol, toCol, err := columnSpan(target)
-			if err != nil {
-				return patchRules{}, err
-			}
-			rules.Cols = append(rules.Cols, styleSpan{Min: fromCol, Max: toCol, StyleID: styleID})
-		case styleTargetRow:
-			row, err := strconv.Atoi(target)
-			if err != nil || row < 1 || row > excelize.TotalRows {
-				return patchRules{}, fmt.Errorf("invalid style row %q", target)
-			}
-			rules.Rows = append(rules.Rows, styleSpan{Min: row, Max: row, StyleID: styleID})
-		case styleTargetCell:
-			from, to := colRange(target)
-			fromCol, fromRow, err := excelize.CellNameToCoordinates(from)
-			if err != nil {
-				return patchRules{}, err
-			}
-			toCol, toRow, err := excelize.CellNameToCoordinates(to)
-			if err != nil {
-				return patchRules{}, err
-			}
-			if fromCol > toCol {
-				fromCol, toCol = toCol, fromCol
-			}
-			if fromRow > toRow {
-				fromRow, toRow = toRow, fromRow
-			}
-			if fromCol == toCol && fromRow == toRow {
-				rules.Cells[normalCellRef(from)] = styleID
-			} else {
-				rules.CellRanges = append(rules.CellRanges, cellSpan{
-					FromCol: fromCol,
-					ToCol:   toCol,
-					FromRow: fromRow,
-					ToRow:   toRow,
-					StyleID: styleID,
-				})
-			}
-		}
-	}
-
-	// Auto-sized widths are the baseline; explicit width metadata is appended
-	// afterward so it overrides the automatic value.
-	for colIdx, width := range s.fieldWidths {
-		if _, err := excelize.ColumnNumberToName(colIdx + 1); err != nil {
-			return patchRules{}, err
-		}
-		rules.Widths = append(rules.Widths, widthSpan{
-			Min:   colIdx + 1,
-			Max:   colIdx + 1,
-			Width: boundedCellWidth(float64(width) * 1.123),
-		})
+		Styles:      s.styleIDs,
+		FieldWidths: s.fieldWidths,
 	}
 	if s.meta != nil {
-		for target, width := range s.meta.width {
-			target = normalizeTarget(target)
-			if !colRe.MatchString(target) {
-				continue
-			}
-			fromCol, toCol, err := columnSpan(target)
-			if err != nil {
-				return patchRules{}, err
-			}
-			rules.Widths = append(rules.Widths, widthSpan{
-				Min:   fromCol,
-				Max:   toCol,
-				Width: boundedCellWidth(width),
-			})
-		}
+		rules.Widths = s.meta.width
 	}
-	return rules, nil
+	return rules
 }
 
 func calcCellWidth(str string) int {
@@ -589,37 +494,4 @@ func calcCellWidth(str string) int {
 		}
 	}
 	return w
-}
-
-func boundedCellWidth(width float64) float64 {
-	return max(min(width, 100.0), 10.0)
-}
-
-func normalizeTarget(target string) string {
-	return strings.TrimSpace(strings.ToUpper(target))
-}
-
-// colRange splits a colon-separated column range (e.g. "A:C") into its two
-// endpoints. A single column name is returned as both endpoints unchanged.
-func colRange(target string) (from, to string) {
-	if f, t, ok := strings.Cut(target, ":"); ok {
-		return f, t
-	}
-	return target, target
-}
-
-func columnSpan(target string) (from, to int, err error) {
-	fromName, toName := colRange(target)
-	from, err = excelize.ColumnNameToNumber(fromName)
-	if err != nil {
-		return 0, 0, err
-	}
-	to, err = excelize.ColumnNameToNumber(toName)
-	if err != nil {
-		return 0, 0, err
-	}
-	if from > to {
-		from, to = to, from
-	}
-	return from, to, nil
 }

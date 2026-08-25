@@ -174,9 +174,8 @@ func TestTransformWorkbookPatchesStylesAndKeepsMode(t *testing.T) {
 	output := filepath.Join(dir, "output.xlsx")
 	if err := transformWorkbook(source, output, map[string]patchRules{
 		paths["Data"]: {
-			Cells:  map[string]int{"B2": styleID},
-			Rows:   []styleSpan{{Min: 1, Max: 1, StyleID: styleID}},
-			Widths: []widthSpan{{Min: 1, Max: 2, Width: 42}},
+			Styles: map[string]int{"1": styleID, "B2": styleID},
+			Widths: map[string]float64{"A:B": 42},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -220,7 +219,7 @@ func TestTransformWorkbookRejectsUnknownPart(t *testing.T) {
 	}
 	output := filepath.Join(dir, "output.xlsx")
 	err := transformWorkbook(source, output, map[string]patchRules{
-		"xl/worksheets/missing.xml": {Rows: []styleSpan{{Min: 1, Max: 1, StyleID: 1}}},
+		"xl/worksheets/missing.xml": {Styles: map[string]int{"1": 1}},
 	})
 	if err == nil {
 		t.Fatal("expected an error for a missing worksheet part")
@@ -276,10 +275,12 @@ func TestTransformWorksheetStylePrecedence(t *testing.T) {
 	output := filepath.Join(filepath.Dir(source), "out.xlsx")
 	if err := transformWorkbook(source, output, map[string]patchRules{
 		part: {
-			Cells:      map[string]int{"A2": exact},
-			CellRanges: []cellSpan{{FromCol: 1, ToCol: 2, FromRow: 2, ToRow: 3, StyleID: ranged}},
-			Rows:       []styleSpan{{Min: 2, Max: 2, StyleID: rowStyle}},
-			Cols:       []styleSpan{{Min: 1, Max: 2, StyleID: colStyle}},
+			Styles: map[string]int{
+				"A2":    exact,
+				"A2:B3": ranged,
+				"2":     rowStyle,
+				"A:B":   colStyle,
+			},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -319,7 +320,7 @@ func TestTransformWorksheetRejectsInvalidCellRule(t *testing.T) {
 	source, part, ids := styleFixture(t, 1)
 	output := filepath.Join(filepath.Dir(source), "out.xlsx")
 	err := transformWorkbook(source, output, map[string]patchRules{
-		part: {Cells: map[string]int{"NOPE": ids[0]}},
+		part: {Styles: map[string]int{"NOPE": ids[0]}},
 	})
 	if err == nil {
 		t.Fatal("expected an error for an invalid cell reference")
