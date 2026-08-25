@@ -330,6 +330,69 @@ func TestTransformWorksheetRejectsInvalidCellRule(t *testing.T) {
 	}
 }
 
+// Width-only rules never touch <sheetData>, so the transformer copies it
+// verbatim instead of re-encoding every cell. The copied bytes must still
+// produce a readable workbook with the widths applied.
+func TestTransformWorksheetCopiesUntouchedSheetData(t *testing.T) {
+	type row struct {
+		Name  string
+		Count int
+	}
+	rows := make([]any, 0, 200)
+	for i := range 200 {
+		rows = append(rows, row{Name: fmt.Sprintf("name <%d> & more", i), Count: i})
+	}
+
+	path := filepath.Join(t.TempDir(), "widths.xlsx")
+	if err := Generate(path, WorksheetConf{
+		SheetName: "Data",
+		Rows:      NewStructRows(rows),
+		Script:    `width = {"B": 42.0}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	sheetRows, err := book.GetRows("Data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sheetRows) != len(rows)+1 {
+		t.Fatalf("row count = %d, want %d", len(sheetRows), len(rows)+1)
+	}
+	if got := sheetRows[200][0]; got != "name <199> & more" {
+		t.Errorf("last row name = %q", got)
+	}
+	if got, err := book.GetColWidth("Data", "B"); err != nil || got != 42 {
+		t.Errorf("column B width = %v (err %v), want 42", got, err)
+	}
+}
+
+// An empty sheet leaves a self-closing <sheetData/>, whose end element is
+// synthesized by the decoder and consumes no input.
+func TestTransformWorksheetCopiesEmptySheetData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.xlsx")
+	if err := Generate(path, WorksheetConf{
+		SheetName: "Data",
+		Rows:      NewStructRows(nil),
+		Script:    `width = {"A": 30.0}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	if got, err := book.GetColWidth("Data", "A"); err != nil || got != 30 {
+		t.Errorf("column A width = %v (err %v), want 30", got, err)
+	}
+}
+
 func worksheetXML(t *testing.T, path, part string) string {
 	t.Helper()
 	zr, err := zip.OpenReader(path)

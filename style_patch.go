@@ -446,14 +446,61 @@ func decodeZipXML(entry *zip.File, dst any) error {
 	return xml.NewDecoder(rc).Decode(dst)
 }
 
+// sheetDataUntouched reports whether the rules change nothing inside
+// <sheetData>. Column widths and column styles live in <cols>, which precedes
+// <sheetData>, so such worksheets can be copied verbatim from that point on.
+func (p preparedRules) sheetDataUntouched() bool {
+	return len(p.Rows) == 0 && len(p.Cells) == 0 && len(p.CellRanges) == 0 && len(p.Cols) == 0
+}
+
+// tailCapture records the bytes read from the worksheet part so a bail-out can
+// re-emit whatever the XML decoder buffered past the last returned token.
+// Capturing stops as soon as bailing out is no longer possible, so the recorded
+// prefix stays bounded by the worksheet header.
+type tailCapture struct {
+	src     io.Reader
+	buf     []byte
+	stopped bool
+}
+
+func (t *tailCapture) Read(p []byte) (int, error) {
+	n, err := t.src.Read(p)
+	if !t.stopped {
+		t.buf = append(t.buf, p[:n]...)
+	}
+	return n, err
+}
+
+func (t *tailCapture) stop() {
+	t.stopped = true
+	t.buf = nil
+}
+
+// selfClosed reports whether the element source text ending at the given input
+// offset was written in self-closing form, i.e. its end element is synthesized
+// by the decoder and consumes no input.
+func (t *tailCapture) selfClosed(offset int64) bool {
+	return offset >= 2 && int(offset) <= len(t.buf) && t.buf[offset-2] == '/'
+}
+
+// tail returns the captured bytes the decoder read past the given offset.
+func (t *tailCapture) tail(offset int64) []byte {
+	if int(offset) >= len(t.buf) {
+		return nil
+	}
+	return t.buf[offset:]
+}
+
 func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) error {
 	rules, err := prepareRules(patch)
 	if err != nil {
 		return err
 	}
 
-	dec := xml.NewDecoder(src)
+	capture := &tailCapture{src: src}
+	dec := xml.NewDecoder(capture)
 	enc := xml.NewEncoder(dst)
+	bailArmed, pendingSyntheticEnd := false, false
 
 	rowNumber := 0
 	columnNumber := 0
@@ -468,6 +515,20 @@ func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) 
 	pendingIndex := 0
 
 	for {
+		// The encoder output matches the input byte for byte up to the current
+		// offset, so the remainder of the part can be copied without parsing.
+		if bailArmed && !pendingSyntheticEnd {
+			if err := enc.Flush(); err != nil {
+				return err
+			}
+			if _, err := dst.Write(capture.tail(dec.InputOffset())); err != nil {
+				return err
+			}
+			capture.stop()
+			_, err := io.Copy(dst, src)
+			return err
+		}
+
 		token, err := dec.Token()
 		if err == io.EOF {
 			break
@@ -497,6 +558,10 @@ func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) 
 
 			case "sheetData":
 				sheetDataDepth = depth
+				bailArmed = rules.sheetDataUntouched()
+				if !bailArmed {
+					capture.stop() // bailing out is no longer possible
+				}
 				lastWrittenRow = 0
 				// <cols> must occur before <sheetData>. Add it when the source
 				// worksheet has no column definitions at all.
@@ -569,9 +634,11 @@ func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) 
 			}
 			token = t
 			depth++
+			pendingSyntheticEnd = capture.selfClosed(dec.InputOffset())
 
 		case xml.EndElement:
 			depth--
+			pendingSyntheticEnd = false
 			if rowDepth >= 0 && t.Name.Local == "row" && depth == rowDepth {
 				if err := writeCellsBefore(enc, ns, rowNumber, pending, &pendingIndex, excelize.MaxColumns+1); err != nil {
 					return err
@@ -592,6 +659,9 @@ func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) 
 				}
 				sheetDataDepth = -1
 			}
+
+		default:
+			pendingSyntheticEnd = false
 		}
 
 		switch token := token.(type) {
@@ -728,12 +798,31 @@ func writeCellsBefore(enc *xml.Encoder, ns *namespaceState, row int, cells []sty
 	return nil
 }
 
+// plainElement reports whether an element needs no prefix or declaration
+// rewriting, so it can be emitted with its attributes untouched. This is the
+// case for nearly every element of a worksheet, including all cells.
+func plainElement(start xml.StartElement, ns *namespaceState) bool {
+	if start.Name.Space != "" && start.Name.Space != ns.main {
+		return false
+	}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" || attr.Name.Local == "xmlns" || strings.HasPrefix(attr.Name.Local, "xmlns:") {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeStartElement(start xml.StartElement, ns *namespaceState, root bool) xml.StartElement {
 	if root && ns.main == "" {
 		ns.main = start.Name.Space
 		if ns.main == "" {
 			ns.main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 		}
+	}
+
+	if !root && plainElement(start, ns) {
+		return xml.StartElement{Name: xml.Name{Local: start.Name.Local}, Attr: start.Attr}
 	}
 
 	name := normalizeName(start.Name, ns)
