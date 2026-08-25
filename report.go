@@ -39,10 +39,11 @@ type WorksheetConf struct {
 
 type worksheetState struct {
 	WorksheetConf
-	workbook    *excelize.File // borrowed; excelReport owns its lifecycle
-	meta        *scriptMeta
-	fieldWidths []int
-	styleIDs    map[string]int
+	workbook     *excelize.File // borrowed; excelReport owns its lifecycle
+	meta         *scriptMeta
+	fieldWidths  []int
+	styleIDs     map[string]int
+	streamStyled bool // cell styles were applied while streaming rows
 }
 
 type excelReport struct {
@@ -302,19 +303,27 @@ func (s *worksheetState) populateSheet() error {
 	if err != nil {
 		return err
 	}
-	if err := stream.SetRow("A1", headers); err != nil {
+	styler, err := newStreamStyler(s.workbook, s.styleIDs)
+	if err != nil {
 		return err
 	}
-	if err := s.writeDataRows(stream, s.Rows, headerIndices, fieldWidths); err != nil {
+	if err := styler.writeRow(stream, 1, headers); err != nil {
+		return err
+	}
+	if err := s.writeDataRows(stream, s.Rows, styler, headerIndices, fieldWidths); err != nil {
 		return err
 	}
 	if err := s.Rows.Err(); err != nil {
+		return err
+	}
+	if err := styler.finish(stream); err != nil {
 		return err
 	}
 	if err := stream.Flush(); err != nil {
 		return err
 	}
 	s.fieldWidths = fieldWidths
+	s.streamStyled = true
 	return nil
 }
 
@@ -339,12 +348,7 @@ func (s *worksheetState) prepareHeaders() ([]any, map[string]int, []int, error) 
 	return headers, headerIndices, fieldWidths, nil
 }
 
-func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, rowReader RowsReader, headerIndices map[string]int, fieldWidths []int) error {
-	dateStyleID, err := s.workbook.NewStyle(&excelize.Style{NumFmt: OpenXMLShortDateFmtDateId})
-	if err != nil {
-		return err
-	}
-
+func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, rowReader RowsReader, styler *streamStyler, headerIndices map[string]int, fieldWidths []int) error {
 	var lastRow []any
 	rowIdx := 2
 	for rowReader.Next() {
@@ -362,20 +366,12 @@ func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, rowReader 
 		}
 
 		if lastRow != nil {
-			if rowIdx, err = s.insertGroupBreaks(stream, rowIdx, fields, lastRow, headerIndices); err != nil {
+			if rowIdx, err = s.insertGroupBreaks(stream, styler, rowIdx, fields, lastRow, headerIndices); err != nil {
 				return err
 			}
 		}
 
-		values := make([]any, len(fields))
-		for col, field := range fields {
-			if _, ok := field.(time.Time); ok {
-				values[col] = excelize.Cell{StyleID: dateStyleID, Value: field}
-			} else {
-				values[col] = field
-			}
-		}
-		if err := stream.SetRow(fmt.Sprintf("A%d", rowIdx), values); err != nil {
+		if err := styler.writeRow(stream, rowIdx, fields); err != nil {
 			return err
 		}
 		trackFieldWidths(fields, fieldWidths)
@@ -385,10 +381,10 @@ func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, rowReader 
 	return nil
 }
 
-func (s *worksheetState) insertGroupBreaks(stream *excelize.StreamWriter, rowIdx int, fields, lastRow []any, headerIndices map[string]int) (int, error) {
+func (s *worksheetState) insertGroupBreaks(stream *excelize.StreamWriter, styler *streamStyler, rowIdx int, fields, lastRow []any, headerIndices map[string]int) (int, error) {
 	for _, field := range s.meta.groupFields {
 		if colIdx, ok := headerIndices[field]; ok && fields[colIdx] != lastRow[colIdx] {
-			if err := stream.SetRow(fmt.Sprintf("A%d", rowIdx), []any{}); err != nil {
+			if err := styler.writeRow(stream, rowIdx, nil); err != nil {
 				return rowIdx, err
 			}
 			return rowIdx + 1, nil
@@ -476,6 +472,12 @@ func (s *worksheetState) worksheetPatchRules() patchRules {
 	rules := patchRules{
 		Styles:      s.styleIDs,
 		FieldWidths: s.fieldWidths,
+	}
+	if s.streamStyled {
+		// Cell, row and range styles are already in the streamed worksheet, so
+		// only the column styles of the <cols> element are left to patch.
+		rules.Styles = columnStyles(s.styleIDs)
+		rules.SheetDataStyled = true
 	}
 	if s.meta != nil {
 		rules.Widths = s.meta.width

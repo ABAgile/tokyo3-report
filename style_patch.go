@@ -43,6 +43,9 @@ type patchRules struct {
 	Styles      map[string]int     // target -> workbook style ID
 	Widths      map[string]float64 // column target -> explicit width
 	FieldWidths []int              // auto-sized content widths by zero-based column
+	// SheetDataStyled marks worksheets whose cells were already styled while
+	// their rows were streamed, leaving only <cols> to patch.
+	SheetDataStyled bool
 }
 
 func (r patchRules) empty() bool {
@@ -58,6 +61,8 @@ type compiledPatchRules struct {
 	Rows       []styleSpan // Excel row numbers, inclusive
 	Cols       []styleSpan // Excel column numbers, inclusive; A=1
 	Widths     []widthSpan // Excel column widths, inclusive; A=1
+
+	SheetDataStyled bool
 }
 
 const (
@@ -131,7 +136,8 @@ func columnSpan(target string) (from, to int, err error) {
 
 func compilePatchRules(spec patchRules) (compiledPatchRules, error) {
 	rules := compiledPatchRules{
-		Cells: make(map[string]int),
+		Cells:           make(map[string]int),
+		SheetDataStyled: spec.SheetDataStyled,
 	}
 	for target, styleID := range spec.Styles {
 		target = normalizeTarget(target)
@@ -449,8 +455,13 @@ func decodeZipXML(entry *zip.File, dst any) error {
 // sheetDataUntouched reports whether the rules change nothing inside
 // <sheetData>. Column widths and column styles live in <cols>, which precedes
 // <sheetData>, so such worksheets can be copied verbatim from that point on.
+// Column styles also fall back to <cols> alone once the cells carry their
+// styles from the streamed write.
 func (p preparedRules) sheetDataUntouched() bool {
-	return len(p.Rows) == 0 && len(p.Cells) == 0 && len(p.CellRanges) == 0 && len(p.Cols) == 0
+	if len(p.Rows) != 0 || len(p.Cells) != 0 || len(p.CellRanges) != 0 {
+		return false
+	}
+	return p.SheetDataStyled || len(p.Cols) == 0
 }
 
 // tailCapture records the bytes read from the worksheet part so a bail-out can

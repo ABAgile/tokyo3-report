@@ -28,7 +28,7 @@ Generate(outputPath, worksheets...) ──► .xlsx file
                           └── Translator (optional, localises headers and enum values)
 ```
 
-`Generate` either creates a new workbook or opens an existing one. Each worksheet with a `RowsReader` replaces its named sheet with fresh data; a nil reader preserves an existing named sheet while applying script-defined layout. All row data is streamed into one staged workbook, which is patched for styles and widths before the final atomic replacement. If the target file does not exist it is created from scratch; if it exists, unrelated sheets are left untouched.
+`Generate` either creates a new workbook or opens an existing one. Each worksheet with a `RowsReader` replaces its named sheet with fresh data; a nil reader preserves an existing named sheet while applying script-defined layout. All row data is streamed into one staged workbook, whose column widths, and the styles of sheets without a `RowsReader`, are patched in before the final atomic replacement. If the target file does not exist it is created from scratch; if it exists, unrelated sheets are left untouched.
 
 ---
 
@@ -227,8 +227,9 @@ Each key selects a target; each value is the JSON serialisation of an [excelize 
 | Cell reference | `"B2"` | Single cell |
 | Cell range | `"B2:D10"` | Every cell in the rectangle |
 
-Styles are written straight into the worksheet XML while the staged workbook is
-streamed, so a style never loads sheet data into memory.
+Styles of a sheet with a `RowsReader` are applied while its rows are streamed.
+Sheets without one are patched directly in the staged worksheet XML. Neither
+path loads sheet data into memory.
 
 **Precedence** (first match wins): cell reference → cell range → row → column.
 A style replaces the target's existing style rather than merging with it, so a
