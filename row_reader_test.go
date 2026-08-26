@@ -168,6 +168,37 @@ func TestSqlxRows(t *testing.T) {
 	}
 }
 
+func TestSqlxRows_NumericTypesAndSnapshots(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	rows := sqlmock.NewRowsWithColumnDefinition(
+		sqlmock.NewColumn("amount").OfType("decimal(10,2)", ""),
+		sqlmock.NewColumn("ratio").OfType("numeric", []byte{}),
+		sqlmock.NewColumn("code").OfType("TEXT", ""),
+	).AddRow("12.50", []byte("3.75"), "0012").AddRow("4.50", []byte("5.25"), "0013")
+	mock.ExpectQuery("SELECT .*").WillReturnRows(rows)
+
+	reader := NewSqlxRows("SELECT * FROM amounts", sqlx.NewDb(db, "sqlmock"))
+	assert.NoError(t, reader.Read())
+
+	assert.True(t, reader.Next())
+	first, err := reader.Values()
+	assert.NoError(t, err)
+	assert.Equal(t, []any{float64(12.5), float64(3.75), "0012"}, first)
+
+	assert.True(t, reader.Next())
+	second, err := reader.Values()
+	assert.NoError(t, err)
+	assert.Equal(t, []any{float64(4.5), float64(5.25), "0013"}, second)
+	assert.Equal(t, []any{float64(12.5), float64(3.75), "0012"}, first)
+
+	assert.False(t, reader.Next())
+	assert.NoError(t, reader.Err())
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestSqlxRows_NilDB(t *testing.T) {
 	r := NewSqlxRows("SELECT 1", nil)
 	assert.ErrorIs(t, r.Read(), sql.ErrNoRows)

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -83,8 +84,8 @@ type SqlxRows struct {
 	// numeric marks the columns whose text form has to be parsed as a float.
 	// It is resolved once instead of per cell of every row.
 	numeric []bool
-	// scratch receives each scan and dest holds pointers into it, so only the
-	// returned slice is allocated per row.
+	// scratch receives each scan and dest holds pointers into it. Both are
+	// reused between rows.
 	scratch []any
 	dest    []any
 }
@@ -93,6 +94,19 @@ func NewSqlxRows(query string, db *sqlx.DB) *SqlxRows {
 	return &SqlxRows{
 		query: query,
 		db:    db,
+	}
+}
+
+func isNumericType(name string) bool {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	if i := strings.IndexByte(name, '('); i >= 0 {
+		name = strings.TrimSpace(name[:i])
+	}
+	switch name {
+	case "NUMERIC", "DECIMAL":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -109,7 +123,7 @@ func (r *SqlxRows) Read() error {
 	}
 	r.numeric = make([]bool, len(r.columnTypes))
 	for i, columnType := range r.columnTypes {
-		r.numeric[i] = columnType.DatabaseTypeName() == "NUMERIC"
+		r.numeric[i] = isNumericType(columnType.DatabaseTypeName())
 	}
 	r.scratch = make([]any, len(r.columnTypes))
 	r.dest = make([]any, len(r.columnTypes))
@@ -126,18 +140,25 @@ func (r *SqlxRows) Values() ([]any, error) {
 	if err := r.rows.Scan(r.dest...); err != nil {
 		return nil, err
 	}
-	// The caller keeps the previous row for group breaks, so every row needs
-	// its own slice; only the scan destinations are reused.
+	// Scan storage is reused by the next row, so return an independent
+	// snapshot for callers that retain this row.
 	vals := make([]any, len(r.scratch))
 	copy(vals, r.scratch)
 	for i, val := range vals {
 		if val == nil || !r.numeric[i] {
 			continue
 		}
-		if text, ok := val.(string); ok {
-			if f, err := strconv.ParseFloat(text, 64); err == nil {
-				vals[i] = f
-			}
+		var text string
+		switch value := val.(type) {
+		case string:
+			text = value
+		case []byte:
+			text = string(value)
+		default:
+			continue
+		}
+		if f, err := strconv.ParseFloat(text, 64); err == nil {
+			vals[i] = f
 		}
 	}
 	return vals, nil
