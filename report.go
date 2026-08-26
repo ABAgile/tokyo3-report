@@ -3,7 +3,9 @@ package report
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -45,6 +47,9 @@ type worksheetState struct {
 	fieldWidths  []int
 	styleRules   []styleRule
 	streamStyled bool // cell styles were applied while streaming rows
+	// widthScratch keeps number and date formatting allocation free while
+	// tracking column widths row by row.
+	widthScratch [64]byte
 }
 
 type excelReport struct {
@@ -274,10 +279,15 @@ func (s *worksheetState) prepareWorksheet(report *excelReport) error {
 }
 
 func (s *worksheetState) populateSheet() error {
+	// Readers backed by a live result set have to be released even when read
+	// initialization fails or the rows are not iterated to the end.
+	if closer, ok := s.Rows.(io.Closer); ok {
+		defer closer.Close()
+	}
 	if err := s.Rows.Read(); err != nil {
 		return err
 	}
-	if s.Rows.Err() == sql.ErrNoRows {
+	if errors.Is(s.Rows.Err(), sql.ErrNoRows) {
 		return s.processStyleMeta()
 	}
 
@@ -302,7 +312,7 @@ func (s *worksheetState) populateSheet() error {
 	if err := styler.writeRow(stream, 1, headers); err != nil {
 		return err
 	}
-	if err := s.writeDataRows(stream, s.Rows, styler, headerIndices, fieldWidths); err != nil {
+	if err := s.writeDataRows(stream, styler, headerIndices, fieldWidths); err != nil {
 		return err
 	}
 	if err := s.Rows.Err(); err != nil {
@@ -340,11 +350,11 @@ func (s *worksheetState) prepareHeaders() ([]any, map[string]int, []int, error) 
 	return headers, headerIndices, fieldWidths, nil
 }
 
-func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, rowReader RowsReader, styler *streamStyler, headerIndices map[string]int, fieldWidths []int) error {
+func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, styler *streamStyler, headerIndices map[string]int, fieldWidths []int) error {
 	var lastRow []any
 	rowIdx := 2
-	for rowReader.Next() {
-		fields, err := rowReader.Values()
+	for s.Rows.Next() {
+		fields, err := s.Rows.Values()
 		if err != nil {
 			return err
 		}
@@ -366,7 +376,7 @@ func (s *worksheetState) writeDataRows(stream *excelize.StreamWriter, rowReader 
 		if err := styler.writeRow(stream, rowIdx, fields); err != nil {
 			return err
 		}
-		trackFieldWidths(fields, fieldWidths)
+		s.trackFieldWidths(fields, fieldWidths)
 		lastRow = fields
 		rowIdx++
 	}
@@ -385,10 +395,8 @@ func (s *worksheetState) insertGroupBreaks(stream *excelize.StreamWriter, styler
 	return rowIdx, nil
 }
 
-func trackFieldWidths(fields []any, fieldWidths []int) {
-	// The scratch buffer keeps number and date formatting allocation free.
-	var scratch [64]byte
-	buf := scratch[:0]
+func (s *worksheetState) trackFieldWidths(fields []any, fieldWidths []int) {
+	buf := s.widthScratch[:0]
 	for col, width := range fieldWidths {
 		if w := valueWidth(fields[col], buf); w > width {
 			fieldWidths[col] = w
@@ -499,9 +507,7 @@ func (s *worksheetState) worksheetRuleSpec() worksheetRules {
 		rules.StyleRules = columnStyles(s.styleRules)
 		rules.SheetDataAlreadyStyled = true
 	}
-	if s.meta != nil {
-		rules.ExplicitWidths = s.meta.widths
-	}
+	rules.ExplicitWidths = s.meta.widths
 	return rules
 }
 

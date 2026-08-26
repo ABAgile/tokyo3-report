@@ -54,6 +54,8 @@ func (r *StructRows) Values() ([]any, error) {
 			if !val.IsNil() {
 				val = val.Elem()
 			} else {
+				// A nil pointer becomes an empty cell rather than a typed
+				// nil, which would otherwise be rendered as "<nil>".
 				val = reflect.ValueOf("")
 			}
 		}
@@ -183,6 +185,16 @@ func (r *SqlxRows) Err() error {
 		return sql.ErrNoRows
 	}
 	return r.rows.Err()
+}
+
+// Close releases the underlying result set. Iterating to the end closes it
+// already, so this only matters when reading stops early. It is safe to call
+// more than once, and Err still reports any error seen while iterating.
+func (r *SqlxRows) Close() error {
+	if r.rows == nil {
+		return nil
+	}
+	return r.rows.Close()
 }
 
 var _ RowsReader = (*SqlxRows)(nil) // interface implementation check

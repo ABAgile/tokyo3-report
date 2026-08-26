@@ -25,10 +25,7 @@ func newStreamStyler(book *excelize.File, styleRules []styleRule) (*streamStyler
 	if err != nil {
 		return nil, err
 	}
-	rules, err := prepareRules(compiled)
-	if err != nil {
-		return nil, err
-	}
+	rules := prepareRules(compiled)
 	dateStyleID, err := book.NewStyle(&excelize.Style{NumFmt: OpenXMLShortDateFmtDateId})
 	if err != nil {
 		return nil, err
@@ -66,15 +63,7 @@ func (s *streamStyler) materializeBefore(stream *excelize.StreamWriter, row int)
 
 // finish writes the styled rows that follow the last data row.
 func (s *streamStyler) finish(stream *excelize.StreamWriter) error {
-	for {
-		styledRow, ok := s.rules.nextStyledRow(s.lastRow)
-		if !ok {
-			return nil
-		}
-		if err := s.writeRow(stream, styledRow, nil); err != nil {
-			return err
-		}
-	}
+	return s.materializeBefore(stream, excelize.TotalRows+1)
 }
 
 // styleRow resolves the style of every cell of one row. Precedence matches the

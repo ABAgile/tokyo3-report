@@ -73,6 +73,29 @@ func TestTransformWorkbookPatchesStylesAndKeepsMode(t *testing.T) {
 	}
 }
 
+func TestTransformWorkbookRejectsSameFile(t *testing.T) {
+	source, _, ids := styleFixture(t, 1)
+	err := transformWorkbook(source, source, map[string]worksheetRules{
+		"Data": {StyleRules: []styleRule{{Target: "A1", StyleID: ids[0]}}},
+	})
+	if err == nil {
+		t.Fatal("expected an error when input and output are the same file")
+	}
+
+	book, err := excelize.OpenFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	rows, err := book.GetRows("Data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[1][0] != "a" {
+		t.Errorf("source workbook was changed: %v", rows)
+	}
+}
+
 func TestTransformWorkbookRejectsUnknownSheet(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.xlsx")

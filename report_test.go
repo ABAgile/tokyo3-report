@@ -186,6 +186,65 @@ func TestGenerate_MultipleWorksheetsPreservesOutputOnError(t *testing.T) {
 	assert.Equal(t, [][]string{{"Name"}, {"Original second"}}, rows)
 }
 
+// closableRows reports whether Generate released the reader.
+type closableRows struct {
+	*StructRows
+	closed int
+}
+
+func (r *closableRows) Close() error {
+	r.closed++
+	return nil
+}
+
+type readErrorRows struct {
+	*StructRows
+	closed int
+}
+
+func (r *readErrorRows) Read() error { return errors.New("read failed") }
+
+func (r *readErrorRows) Close() error {
+	r.closed++
+	return nil
+}
+
+func TestGenerate_ClosesRowsReader(t *testing.T) {
+	rows := func() *closableRows {
+		return &closableRows{StructRows: NewStructRows([]any{struct{ Name string }{"Alice"}})}
+	}
+
+	success := rows()
+	assert.NoError(t, Generate(filepath.Join(t.TempDir(), "report.xlsx"), WorksheetConf{
+		SheetName: "Sheet1",
+		Rows:      success,
+	}))
+	assert.Equal(t, 1, success.closed)
+
+	// An error partway through the rows must release the reader too.
+	failed := rows()
+	assert.Error(t, Generate(filepath.Join(t.TempDir(), "report.xlsx"), WorksheetConf{
+		SheetName: "Sheet1",
+		Rows:      failed,
+		Script:    `col = {"Name": {"parser": "fail"}}`,
+		Parsers: map[string]Parser{
+			"fail": func(any) (any, error) { return nil, errors.New("invalid value") },
+		},
+	}))
+	assert.Equal(t, 1, failed.closed)
+}
+
+func TestGenerate_ClosesRowsReaderWhenReadFails(t *testing.T) {
+	rows := &readErrorRows{StructRows: NewStructRows([]any{struct{ Name string }{"Alice"}})}
+
+	err := Generate(filepath.Join(t.TempDir(), "report.xlsx"), WorksheetConf{
+		SheetName: "Sheet1",
+		Rows:      rows,
+	})
+	assert.EqualError(t, err, "read failed")
+	assert.Equal(t, 1, rows.closed)
+}
+
 func TestGenerate_ReopenOverridesExistingSheet(t *testing.T) {
 	path := "/tmp/test_reopen.xlsx"
 	defer os.Remove(path)

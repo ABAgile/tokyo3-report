@@ -36,10 +36,7 @@ func TestCompileRulesPreservesRuleOrder(t *testing.T) {
 		t.Errorf("column width = %v, %v; want 30, true", got, ok)
 	}
 
-	prepared, err := prepareRules(compiled)
-	if err != nil {
-		t.Fatal(err)
-	}
+	prepared := prepareRules(compiled)
 	got := prepared.styledCells(1)
 	want := []styledCell{{col: 1, styleID: 3}, {col: 2, styleID: 4}, {col: 3, styleID: 4}}
 	if len(got) != len(want) {

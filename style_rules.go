@@ -5,7 +5,6 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -40,6 +39,11 @@ type styledCell struct {
 	styleID int
 }
 
+// cellCoord is a resolved single-cell target; A1 is {col: 1, row: 1}.
+type cellCoord struct {
+	col, row int
+}
+
 // styleRule is one ordered target-to-workbook-style mapping.
 type styleRule struct {
 	Target  string
@@ -68,9 +72,9 @@ func (r worksheetRules) empty() bool {
 // compiledRules contains normalized numeric ranges shared by the streaming and
 // worksheet XML style appliers.
 type compiledRules struct {
-	// Cells maps normalized target cell references (e.g. "B4") to workbook
-	// style IDs. Exact cell rules always win.
-	Cells      map[string]int
+	// Cells maps resolved single-cell targets to workbook style IDs.
+	// Exact cell rules always win.
+	Cells      map[cellCoord]int
 	CellRanges []cellSpan
 	Rows       []styleSpan // Excel row numbers, inclusive
 	Cols       []styleSpan // Excel column numbers, inclusive; A=1
@@ -99,10 +103,6 @@ func styleTargetKind(target string) int {
 
 func normalizeTarget(target string) string {
 	return strings.TrimSpace(strings.ToUpper(target))
-}
-
-func normalizeCellRef(ref string) string {
-	return strings.ToUpper(strings.ReplaceAll(ref, "$", ""))
 }
 
 func boundedCellWidth(width float64) float64 {
@@ -136,7 +136,7 @@ func columnSpan(target string) (from, to int, err error) {
 
 func compileRules(spec worksheetRules) (compiledRules, error) {
 	rules := compiledRules{
-		Cells:                  make(map[string]int),
+		Cells:                  make(map[cellCoord]int),
 		SheetDataAlreadyStyled: spec.SheetDataAlreadyStyled,
 	}
 	for _, style := range spec.StyleRules {
@@ -171,7 +171,7 @@ func compileRules(spec worksheetRules) (compiledRules, error) {
 				fromRow, toRow = toRow, fromRow
 			}
 			if fromCol == toCol && fromRow == toRow {
-				rules.Cells[normalizeCellRef(from)] = style.StyleID
+				rules.Cells[cellCoord{col: fromCol, row: fromRow}] = style.StyleID
 			} else {
 				rules.CellRanges = append(rules.CellRanges, cellSpan{
 					FromCol: fromCol,
@@ -222,25 +222,21 @@ type preparedRules struct {
 	cellRowNumbers []int                // sorted rows present in cellRows
 }
 
-func prepareRules(rules compiledRules) (preparedRules, error) {
+func prepareRules(rules compiledRules) preparedRules {
 	prepared := preparedRules{compiledRules: rules}
 	if len(rules.Cells) == 0 {
-		return prepared, nil
+		return prepared
 	}
 	prepared.cellRows = make(map[int][]styledCell, len(rules.Cells))
-	for ref, styleID := range rules.Cells {
-		col, row, err := excelize.CellNameToCoordinates(normalizeCellRef(ref))
-		if err != nil {
-			return preparedRules{}, fmt.Errorf("invalid cell reference %q: %w", ref, err)
-		}
-		prepared.cellRows[row] = append(prepared.cellRows[row], styledCell{col: col, styleID: styleID})
+	for cell, styleID := range rules.Cells {
+		prepared.cellRows[cell.row] = append(prepared.cellRows[cell.row], styledCell{col: cell.col, styleID: styleID})
 	}
 	for row, cells := range prepared.cellRows {
 		slices.SortFunc(cells, func(a, b styledCell) int { return a.col - b.col })
 		prepared.cellRowNumbers = append(prepared.cellRowNumbers, row)
 	}
-	sort.Ints(prepared.cellRowNumbers)
-	return prepared, nil
+	slices.Sort(prepared.cellRowNumbers)
+	return prepared
 }
 
 // sheetDataUntouched reports whether the rules change nothing inside
@@ -279,7 +275,7 @@ func (p preparedRules) nextStyledRow(after int) (int, bool) {
 			consider(row)
 		}
 	}
-	if i := sort.SearchInts(p.cellRowNumbers, after+1); i < len(p.cellRowNumbers) {
+	if i, _ := slices.BinarySearch(p.cellRowNumbers, after+1); i < len(p.cellRowNumbers) {
 		consider(p.cellRowNumbers[i])
 	}
 	if next > excelize.TotalRows {

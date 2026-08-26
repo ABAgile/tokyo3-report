@@ -83,9 +83,10 @@ func BenchmarkTrackFieldWidths(b *testing.B) {
 		b.Fatal(err)
 	}
 	widths := make([]int, len(fields))
+	state := &worksheetState{}
 	b.ReportAllocs()
 	for b.Loop() {
-		trackFieldWidths(fields, widths)
+		state.trackFieldWidths(fields, widths)
 	}
 }
 

@@ -199,6 +199,28 @@ func TestSqlxRows_NumericTypesAndSnapshots(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSqlxRows_CloseReleasesRows(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT .*").WillReturnRows(
+		sqlmock.NewRows([]string{"name"}).AddRow("Alice").AddRow("Bob"),
+	)
+
+	reader := NewSqlxRows("SELECT * FROM users", sqlx.NewDb(db, "sqlmock"))
+	assert.NoError(t, reader.Read())
+	assert.True(t, reader.Next()) // stop early, leaving the result set open
+	assert.NoError(t, reader.Close())
+	assert.NoError(t, reader.Close()) // closing twice is safe
+	assert.False(t, reader.Next())
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSqlxRows_CloseWithoutRead(t *testing.T) {
+	assert.NoError(t, NewSqlxRows("SELECT 1", nil).Close())
+}
+
 func TestSqlxRows_NilDB(t *testing.T) {
 	r := NewSqlxRows("SELECT 1", nil)
 	assert.ErrorIs(t, r.Read(), sql.ErrNoRows)

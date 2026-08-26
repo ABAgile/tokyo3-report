@@ -88,6 +88,9 @@ type RowsReader interface {
 }
 ```
 
+A reader that also implements `io.Closer` is closed by `Generate` once the
+worksheet is written, including when generation fails partway through.
+
 Two implementations are provided:
 
 ### StructRows
@@ -111,7 +114,9 @@ Streams directly from a live `*sqlx.DB` query.
 reader := report.NewSqlxRows("SELECT region, product, amount FROM orders", db)
 ```
 
-`NUMERIC` database columns are automatically converted to `float64`.
+`NUMERIC` database columns are automatically converted to `float64`. `Close`
+releases the result set; `Generate` calls it, so only direct users of the
+reader need to.
 
 ---
 

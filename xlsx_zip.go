@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	pathpkg "path"
-	"path/filepath"
 	"strings"
 )
 
@@ -19,7 +18,8 @@ import (
 // resolved from the same archive reader, so the staged file is opened once.
 // The worksheet XML is token-streamed; it is never accumulated in memory, and
 // every other part is copied still compressed. The output keeps the input's
-// file mode.
+// file mode. The output path is written in place and removed again on failure,
+// so callers that need atomic replacement pass a staging path and rename it.
 func transformWorkbook(input, output string, rules map[string]worksheetRules) error {
 	if len(rules) == 0 {
 		return fmt.Errorf("no worksheet rules supplied")
@@ -38,6 +38,13 @@ func transformWorkbook(input, output string, rules map[string]worksheetRules) er
 
 	stat, err := in.Stat()
 	if err != nil {
+		return err
+	}
+	if outputInfo, err := os.Stat(output); err == nil {
+		if os.SameFile(stat, outputInfo) {
+			return fmt.Errorf("input and output must be different files")
+		}
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	zr, err := zip.NewReader(in, stat.Size())
@@ -68,20 +75,19 @@ func transformWorkbook(input, output string, rules map[string]worksheetRules) er
 		compiledTargets[path] = compiled
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(output), ".xlsx-style-*")
+	out, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, stat.Mode().Perm())
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
 	ok := false
 	defer func() {
-		tmp.Close()
+		out.Close()
 		if !ok {
-			os.Remove(tmpName)
+			os.Remove(output)
 		}
 	}()
 
-	zw := zip.NewWriter(tmp)
+	zw := zip.NewWriter(out)
 	for _, entry := range zr.File {
 		path := cleanZipPath(entry.Name)
 		rule, patched := compiledTargets[path]
@@ -116,13 +122,11 @@ func transformWorkbook(input, output string, rules map[string]worksheetRules) er
 	if err := zw.Close(); err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
+	if err := out.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmpName, stat.Mode().Perm()); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, output); err != nil {
+	// O_CREATE applies the umask, so set the input's mode explicitly.
+	if err := os.Chmod(output, stat.Mode().Perm()); err != nil {
 		return err
 	}
 	ok = true

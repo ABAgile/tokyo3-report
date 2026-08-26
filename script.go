@@ -55,27 +55,26 @@ func (s *worksheetState) runScript() error {
 	return nil
 }
 
-func getStarlarkDict(globals starlark.StringDict, key string) *starlark.Dict {
+// forEachStringKey visits the entries of a global dict whose keys are strings,
+// skipping the global entirely when it is absent or not a dict.
+func forEachStringKey(globals starlark.StringDict, key string, fn func(string, starlark.Value)) {
 	dict, _ := globals[key].(*starlark.Dict)
-	return dict
-}
-
-func parseColGlobal(globals starlark.StringDict, meta *scriptMeta) {
-	dict := getStarlarkDict(globals, "col")
 	if dict == nil {
 		return
 	}
 	for _, item := range dict.Items() {
-		colName, ok := starlark.AsString(item[0])
-		if !ok {
-			continue
+		if name, ok := starlark.AsString(item[0]); ok {
+			fn(name, item[1])
 		}
-		entryDict, ok := item[1].(*starlark.Dict)
-		if !ok {
-			continue
-		}
-		meta.col[colName] = starlarkDictToMap(entryDict)
 	}
+}
+
+func parseColGlobal(globals starlark.StringDict, meta *scriptMeta) {
+	forEachStringKey(globals, "col", func(colName string, value starlark.Value) {
+		if entryDict, ok := value.(*starlark.Dict); ok {
+			meta.col[colName] = starlarkDictToMap(entryDict)
+		}
+	})
 }
 
 func starlarkDictToMap(dict *starlark.Dict) map[string]any {
@@ -100,37 +99,19 @@ func starlarkDictToMap(dict *starlark.Dict) map[string]any {
 }
 
 func parseStyleGlobal(globals starlark.StringDict, meta *scriptMeta) {
-	dict := getStarlarkDict(globals, "style")
-	if dict == nil {
-		return
-	}
-	for _, item := range dict.Items() {
-		k, ok := starlark.AsString(item[0])
-		if !ok {
-			continue
+	forEachStringKey(globals, "style", func(target string, value starlark.Value) {
+		if styleJSON, ok := starlark.AsString(value); ok {
+			meta.styles = append(meta.styles, scriptStyle{Target: target, StyleJSON: styleJSON})
 		}
-		v, ok := starlark.AsString(item[1])
-		if !ok {
-			continue
-		}
-		meta.styles = append(meta.styles, scriptStyle{Target: k, StyleJSON: v})
-	}
+	})
 }
 
 func parseWidthGlobal(globals starlark.StringDict, meta *scriptMeta) {
-	dict := getStarlarkDict(globals, "width")
-	if dict == nil {
-		return
-	}
-	for _, item := range dict.Items() {
-		k, ok := starlark.AsString(item[0])
-		if !ok {
-			continue
+	forEachStringKey(globals, "width", func(target string, value starlark.Value) {
+		if f, ok := starlark.AsFloat(value); ok {
+			meta.widths = append(meta.widths, widthRule{Target: target, Width: f})
 		}
-		if f, ok := starlark.AsFloat(item[1]); ok {
-			meta.widths = append(meta.widths, widthRule{Target: k, Width: f})
-		}
-	}
+	})
 }
 
 func parseGroupFieldsGlobal(globals starlark.StringDict, meta *scriptMeta) {
@@ -142,7 +123,7 @@ func parseGroupFieldsGlobal(globals starlark.StringDict, meta *scriptMeta) {
 	if !ok {
 		return
 	}
-	for i := 0; i < list.Len(); i++ {
+	for i := range list.Len() {
 		if s, ok := starlark.AsString(list.Index(i)); ok {
 			meta.groupFields = append(meta.groupFields, s)
 		}

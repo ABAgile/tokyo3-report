@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"io"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -90,10 +89,7 @@ func (t *tailCapture) tail(offset int64) []byte {
 }
 
 func transformWorksheet(src io.Reader, dst io.Writer, compiled compiledRules) error {
-	rules, err := prepareRules(compiled)
-	if err != nil {
-		return err
-	}
+	rules := prepareRules(compiled)
 
 	capture := &tailCapture{src: src}
 	dec := xml.NewDecoder(capture)
@@ -174,20 +170,13 @@ func transformWorksheet(src io.Reader, dst io.Writer, compiled compiledRules) er
 			case "row":
 				// Cell-range styles need explicit cells for blank positions, just
 				// as Excelize's SetCellStyle does in normal mode.
-				rowNumber = attrInt(t.Attr, "r")
-				if rowNumber == 0 {
-					rowNumber++
+				// A row without an explicit number continues the sequence.
+				if rowNumber = attrInt(t.Attr, "r"); rowNumber == 0 {
+					rowNumber = lastWrittenRow + 1
 				}
 				if sheetDataDepth >= 0 && depth == sheetDataDepth+1 {
-					for {
-						styledRow, ok := rules.nextStyledRow(lastWrittenRow)
-						if !ok || styledRow >= rowNumber {
-							break
-						}
-						if err := writeStyledRow(enc, ns, rules, styledRow); err != nil {
-							return err
-						}
-						lastWrittenRow = styledRow
+					if err := flushStyledRows(enc, ns, rules, &lastWrittenRow, rowNumber); err != nil {
+						return err
 					}
 				}
 				if style, ok := spanStyle(rules.Rows, rowNumber); ok {
@@ -200,12 +189,9 @@ func transformWorksheet(src io.Reader, dst io.Writer, compiled compiledRules) er
 
 			case "c":
 				if directRowChild {
-					cellRef := attrString(t.Attr, "r")
-					if cellRef != "" {
-						columnNumber = columnFromRef(cellRef)
-						if columnNumber == 0 {
-							columnNumber++
-						}
+					// A cell without a usable reference continues the sequence.
+					if col, _, err := excelize.CellNameToCoordinates(attrString(t.Attr, "r")); err == nil {
+						columnNumber = col
 					} else {
 						columnNumber++
 					}
@@ -245,15 +231,8 @@ func transformWorksheet(src io.Reader, dst io.Writer, compiled compiledRules) er
 				rowDepth = -1
 			}
 			if sheetDataDepth >= 0 && t.Name.Local == "sheetData" && depth == sheetDataDepth {
-				for {
-					styledRow, ok := rules.nextStyledRow(lastWrittenRow)
-					if !ok {
-						break
-					}
-					if err := writeStyledRow(enc, ns, rules, styledRow); err != nil {
-						return err
-					}
-					lastWrittenRow = styledRow
+				if err := flushStyledRows(enc, ns, rules, &lastWrittenRow, excelize.TotalRows+1); err != nil {
+					return err
 				}
 				sheetDataDepth = -1
 			}
@@ -280,6 +259,21 @@ func transformWorksheet(src io.Reader, dst io.Writer, compiled compiledRules) er
 		}
 	}
 	return enc.Flush()
+}
+
+// flushStyledRows materializes the styled rows the source worksheet does not
+// contain itself, up to but excluding beforeRow, and advances lastWrittenRow.
+func flushStyledRows(enc *xml.Encoder, ns *namespaceState, rules preparedRules, lastWrittenRow *int, beforeRow int) error {
+	for {
+		styledRow, ok := rules.nextStyledRow(*lastWrittenRow)
+		if !ok || styledRow >= beforeRow {
+			return nil
+		}
+		if err := writeStyledRow(enc, ns, rules, styledRow); err != nil {
+			return err
+		}
+		*lastWrittenRow = styledRow
+	}
 }
 
 func writeStyledRow(enc *xml.Encoder, ns *namespaceState, rules preparedRules, row int) error {
@@ -448,8 +442,8 @@ func rewriteCols(input []rawCol, styleRules []styleSpan, widthRules []widthSpan)
 	for _, rule := range widthRules {
 		points = append(points, rule.Min, rule.Max+1)
 	}
-	sort.Ints(points)
-	points = uniqueInts(points)
+	slices.Sort(points)
+	points = slices.Compact(points)
 
 	for i := 0; i+1 < len(points); i++ {
 		lo, hi := points[i], points[i+1]-1
@@ -563,34 +557,4 @@ func attrString(attrs []xml.Attr, name string) string {
 func attrInt(attrs []xml.Attr, name string) int {
 	value, _ := strconv.Atoi(attrString(attrs, name))
 	return value
-}
-
-func columnFromRef(ref string) int {
-	ref = strings.TrimPrefix(strings.ToUpper(ref), "$")
-	cut := strings.IndexFunc(ref, func(r rune) bool { return r >= '0' && r <= '9' })
-	if cut <= 0 {
-		return 0
-	}
-	letters := strings.Trim(ref[:cut], "$")
-	result := 0
-	for _, r := range letters {
-		if r < 'A' || r > 'Z' {
-			return 0
-		}
-		result = result*26 + int(r-'A'+1)
-	}
-	return result
-}
-
-func uniqueInts(values []int) []int {
-	if len(values) == 0 {
-		return values
-	}
-	out := values[:1]
-	for _, value := range values[1:] {
-		if value != out[len(out)-1] {
-			out = append(out, value)
-		}
-	}
-	return out
 }
