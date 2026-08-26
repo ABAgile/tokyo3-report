@@ -20,7 +20,7 @@ import (
 // The worksheet XML is token-streamed; it is never accumulated in memory, and
 // every other part is copied still compressed. The output keeps the input's
 // file mode.
-func transformWorkbook(input, output string, rules map[string]patchRules) error {
+func transformWorkbook(input, output string, rules map[string]worksheetRules) error {
 	if len(rules) == 0 {
 		return fmt.Errorf("no worksheet rules supplied")
 	}
@@ -55,13 +55,13 @@ func transformWorkbook(input, output string, rules map[string]patchRules) error 
 	for _, entry := range zr.File {
 		present[cleanZipPath(entry.Name)] = true
 	}
-	compiledTargets := make(map[string]compiledPatchRules, len(rules))
+	compiledTargets := make(map[string]compiledRules, len(rules))
 	for sheet, spec := range rules {
 		path, ok := paths[sheet]
 		if !ok || !present[path] {
 			return fmt.Errorf("worksheet %q not found in workbook", sheet)
 		}
-		compiled, err := compilePatchRules(spec)
+		compiled, err := compileRules(spec)
 		if err != nil {
 			return err
 		}

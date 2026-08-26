@@ -13,6 +13,45 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+func TestCompileRulesPreservesRuleOrder(t *testing.T) {
+	compiled, err := compileRules(worksheetRules{
+		StyleRules: []styleRule{
+			{Target: "A:C", StyleID: 1},
+			{Target: "B:D", StyleID: 2},
+			{Target: "A1:B1", StyleID: 3},
+			{Target: "B1:C2", StyleID: 4},
+		},
+		ExplicitWidths: []widthRule{
+			{Target: "A:C", Width: 20},
+			{Target: "B:D", Width: 30},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := spanStyle(compiled.Cols, 2); !ok || got != 2 {
+		t.Errorf("column style = %d, %v; want 2, true", got, ok)
+	}
+	if got, ok := spanWidth(compiled.Widths, 2); !ok || got != 30 {
+		t.Errorf("column width = %v, %v; want 30, true", got, ok)
+	}
+
+	prepared, err := prepareRules(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := prepared.styledCells(1)
+	want := []styledCell{{col: 1, styleID: 3}, {col: 2, styleID: 4}, {col: 3, styleID: 4}}
+	if len(got) != len(want) {
+		t.Fatalf("styled cells = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("styled cell %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRewriteColsCombinesStyleAndWidthRules(t *testing.T) {
 	input := []rawCol{{
 		XMLName: xml.Name{Local: "col"},
@@ -179,13 +218,13 @@ func TestTransformWorksheetStylePrecedence(t *testing.T) {
 	exact, ranged, rowStyle, colStyle := ids[0], ids[1], ids[2], ids[3]
 
 	output := filepath.Join(filepath.Dir(source), "out.xlsx")
-	if err := transformWorkbook(source, output, map[string]patchRules{
+	if err := transformWorkbook(source, output, map[string]worksheetRules{
 		"Data": {
-			Styles: map[string]int{
-				"A2":    exact,
-				"A2:B3": ranged,
-				"2":     rowStyle,
-				"A:B":   colStyle,
+			StyleRules: []styleRule{
+				{Target: "A2", StyleID: exact},
+				{Target: "A2:B3", StyleID: ranged},
+				{Target: "2", StyleID: rowStyle},
+				{Target: "A:B", StyleID: colStyle},
 			},
 		},
 	}); err != nil {
@@ -225,8 +264,8 @@ func TestTransformWorksheetStylePrecedence(t *testing.T) {
 func TestTransformWorksheetRejectsInvalidCellRule(t *testing.T) {
 	source, _, ids := styleFixture(t, 1)
 	output := filepath.Join(filepath.Dir(source), "out.xlsx")
-	err := transformWorkbook(source, output, map[string]patchRules{
-		"Data": {Styles: map[string]int{"NOPE": ids[0]}},
+	err := transformWorkbook(source, output, map[string]worksheetRules{
+		"Data": {StyleRules: []styleRule{{Target: "NOPE", StyleID: ids[0]}}},
 	})
 	if err == nil {
 		t.Fatal("expected an error for an invalid cell reference")

@@ -40,33 +40,43 @@ type styledCell struct {
 	styleID int
 }
 
-// patchRules mirrors the worksheet-level style and width metadata after
-// workbook styles have been assigned, but before targets are compiled into
-// numeric XML ranges.
-type patchRules struct {
-	Styles      map[string]int     // target -> workbook style ID
-	Widths      map[string]float64 // column target -> explicit width
-	FieldWidths []int              // auto-sized content widths by zero-based column
-	// SheetDataStyled marks worksheets whose cells were already styled while
-	// their rows were streamed, leaving only <cols> to patch.
-	SheetDataStyled bool
+// styleRule is one ordered target-to-workbook-style mapping.
+type styleRule struct {
+	Target  string
+	StyleID int
 }
 
-func (r patchRules) empty() bool {
-	return len(r.Styles) == 0 && len(r.Widths) == 0 && len(r.FieldWidths) == 0
+// widthRule is one ordered target-to-explicit-width mapping.
+type widthRule struct {
+	Target string
+	Width  float64
 }
 
-// compiledPatchRules contains the numeric ranges consumed by the worksheet
-// XML transformer.
-type compiledPatchRules struct {
-	// Exact cell rules always win.
-	Cells      map[string]int // e.g. "B4": 7
+// worksheetRules carries worksheet style and width metadata before targets are
+// compiled into numeric ranges. Rule slices preserve the script's order.
+type worksheetRules struct {
+	StyleRules             []styleRule
+	ExplicitWidths         []widthRule
+	AutoWidths             []int // content widths by zero-based column
+	SheetDataAlreadyStyled bool  // cells were styled while rows were streamed
+}
+
+func (r worksheetRules) empty() bool {
+	return len(r.StyleRules) == 0 && len(r.ExplicitWidths) == 0 && len(r.AutoWidths) == 0
+}
+
+// compiledRules contains normalized numeric ranges shared by the streaming and
+// worksheet XML style appliers.
+type compiledRules struct {
+	// Cells maps normalized target cell references (e.g. "B4") to workbook
+	// style IDs. Exact cell rules always win.
+	Cells      map[string]int
 	CellRanges []cellSpan
 	Rows       []styleSpan // Excel row numbers, inclusive
 	Cols       []styleSpan // Excel column numbers, inclusive; A=1
 	Widths     []widthSpan // Excel column widths, inclusive; A=1
 
-	SheetDataStyled bool
+	SheetDataAlreadyStyled bool
 }
 
 const (
@@ -91,7 +101,7 @@ func normalizeTarget(target string) string {
 	return strings.TrimSpace(strings.ToUpper(target))
 }
 
-func normalCellRef(ref string) string {
+func normalizeCellRef(ref string) string {
 	return strings.ToUpper(strings.ReplaceAll(ref, "$", ""))
 }
 
@@ -124,35 +134,35 @@ func columnSpan(target string) (from, to int, err error) {
 	return from, to, nil
 }
 
-func compilePatchRules(spec patchRules) (compiledPatchRules, error) {
-	rules := compiledPatchRules{
-		Cells:           make(map[string]int),
-		SheetDataStyled: spec.SheetDataStyled,
+func compileRules(spec worksheetRules) (compiledRules, error) {
+	rules := compiledRules{
+		Cells:                  make(map[string]int),
+		SheetDataAlreadyStyled: spec.SheetDataAlreadyStyled,
 	}
-	for target, styleID := range spec.Styles {
-		target = normalizeTarget(target)
+	for _, style := range spec.StyleRules {
+		target := normalizeTarget(style.Target)
 		switch styleTargetKind(target) {
 		case styleTargetCol:
 			fromCol, toCol, err := columnSpan(target)
 			if err != nil {
-				return compiledPatchRules{}, err
+				return compiledRules{}, err
 			}
-			rules.Cols = append(rules.Cols, styleSpan{Min: fromCol, Max: toCol, StyleID: styleID})
+			rules.Cols = append(rules.Cols, styleSpan{Min: fromCol, Max: toCol, StyleID: style.StyleID})
 		case styleTargetRow:
 			row, err := strconv.Atoi(target)
 			if err != nil || row < 1 || row > excelize.TotalRows {
-				return compiledPatchRules{}, fmt.Errorf("invalid style row %q", target)
+				return compiledRules{}, fmt.Errorf("invalid style row %q", target)
 			}
-			rules.Rows = append(rules.Rows, styleSpan{Min: row, Max: row, StyleID: styleID})
+			rules.Rows = append(rules.Rows, styleSpan{Min: row, Max: row, StyleID: style.StyleID})
 		case styleTargetCell:
 			from, to := colRange(target)
 			fromCol, fromRow, err := excelize.CellNameToCoordinates(from)
 			if err != nil {
-				return compiledPatchRules{}, err
+				return compiledRules{}, err
 			}
 			toCol, toRow, err := excelize.CellNameToCoordinates(to)
 			if err != nil {
-				return compiledPatchRules{}, err
+				return compiledRules{}, err
 			}
 			if fromCol > toCol {
 				fromCol, toCol = toCol, fromCol
@@ -161,14 +171,14 @@ func compilePatchRules(spec patchRules) (compiledPatchRules, error) {
 				fromRow, toRow = toRow, fromRow
 			}
 			if fromCol == toCol && fromRow == toRow {
-				rules.Cells[normalCellRef(from)] = styleID
+				rules.Cells[normalizeCellRef(from)] = style.StyleID
 			} else {
 				rules.CellRanges = append(rules.CellRanges, cellSpan{
 					FromCol: fromCol,
 					ToCol:   toCol,
 					FromRow: fromRow,
 					ToRow:   toRow,
-					StyleID: styleID,
+					StyleID: style.StyleID,
 				})
 			}
 		}
@@ -176,9 +186,9 @@ func compilePatchRules(spec patchRules) (compiledPatchRules, error) {
 
 	// Auto-sized widths are the baseline; explicit width metadata is appended
 	// afterward so it overrides the automatic value.
-	for colIdx, width := range spec.FieldWidths {
+	for colIdx, width := range spec.AutoWidths {
 		if _, err := excelize.ColumnNumberToName(colIdx + 1); err != nil {
-			return compiledPatchRules{}, err
+			return compiledRules{}, err
 		}
 		rules.Widths = append(rules.Widths, widthSpan{
 			Min:   colIdx + 1,
@@ -186,19 +196,19 @@ func compilePatchRules(spec patchRules) (compiledPatchRules, error) {
 			Width: boundedCellWidth(float64(width) * 1.123),
 		})
 	}
-	for target, width := range spec.Widths {
-		target = normalizeTarget(target)
+	for _, width := range spec.ExplicitWidths {
+		target := normalizeTarget(width.Target)
 		if !colRe.MatchString(target) {
 			continue
 		}
 		fromCol, toCol, err := columnSpan(target)
 		if err != nil {
-			return compiledPatchRules{}, err
+			return compiledRules{}, err
 		}
 		rules.Widths = append(rules.Widths, widthSpan{
 			Min:   fromCol,
 			Max:   toCol,
-			Width: boundedCellWidth(width),
+			Width: boundedCellWidth(width.Width),
 		})
 	}
 	return rules, nil
@@ -207,19 +217,19 @@ func compilePatchRules(spec patchRules) (compiledPatchRules, error) {
 // preparedRules indexes the rules of one worksheet so the streaming pass never
 // parses a cell reference or scans the exact-cell rules once per row.
 type preparedRules struct {
-	compiledPatchRules
-	cellRows  map[int][]styledCell // exact cell styles per row, ascending column
-	cellRowNo []int                // sorted rows present in cellRows
+	compiledRules
+	cellRows       map[int][]styledCell // exact cell styles per row, ascending column
+	cellRowNumbers []int                // sorted rows present in cellRows
 }
 
-func prepareRules(rules compiledPatchRules) (preparedRules, error) {
-	prepared := preparedRules{compiledPatchRules: rules}
+func prepareRules(rules compiledRules) (preparedRules, error) {
+	prepared := preparedRules{compiledRules: rules}
 	if len(rules.Cells) == 0 {
 		return prepared, nil
 	}
 	prepared.cellRows = make(map[int][]styledCell, len(rules.Cells))
 	for ref, styleID := range rules.Cells {
-		col, row, err := excelize.CellNameToCoordinates(normalCellRef(ref))
+		col, row, err := excelize.CellNameToCoordinates(normalizeCellRef(ref))
 		if err != nil {
 			return preparedRules{}, fmt.Errorf("invalid cell reference %q: %w", ref, err)
 		}
@@ -227,9 +237,9 @@ func prepareRules(rules compiledPatchRules) (preparedRules, error) {
 	}
 	for row, cells := range prepared.cellRows {
 		slices.SortFunc(cells, func(a, b styledCell) int { return a.col - b.col })
-		prepared.cellRowNo = append(prepared.cellRowNo, row)
+		prepared.cellRowNumbers = append(prepared.cellRowNumbers, row)
 	}
-	sort.Ints(prepared.cellRowNo)
+	sort.Ints(prepared.cellRowNumbers)
 	return prepared, nil
 }
 
@@ -242,7 +252,7 @@ func (p preparedRules) sheetDataUntouched() bool {
 	if len(p.Rows) != 0 || len(p.Cells) != 0 || len(p.CellRanges) != 0 {
 		return false
 	}
-	return p.SheetDataStyled || len(p.Cols) == 0
+	return p.SheetDataAlreadyStyled || len(p.Cols) == 0
 }
 
 // nextStyledRow finds the first row after the given one that must be
@@ -269,8 +279,8 @@ func (p preparedRules) nextStyledRow(after int) (int, bool) {
 			consider(row)
 		}
 	}
-	if i := sort.SearchInts(p.cellRowNo, after+1); i < len(p.cellRowNo) {
-		consider(p.cellRowNo[i])
+	if i := sort.SearchInts(p.cellRowNumbers, after+1); i < len(p.cellRowNumbers) {
+		consider(p.cellRowNumbers[i])
 	}
 	if next > excelize.TotalRows {
 		return 0, false
@@ -314,9 +324,9 @@ func (p preparedRules) styledCells(row int) []styledCell {
 	return cells
 }
 
-// rowOrColStyle is the fallback for cells that no exact cell or cell-range
+// rowOrColumnStyle is the fallback for cells that no exact cell or cell-range
 // rule targets. Row rules win over column rules, as in Excel.
-func rowOrColStyle(rules compiledPatchRules, row, col int) (int, bool) {
+func rowOrColumnStyle(rules compiledRules, row, col int) (int, bool) {
 	if id, ok := spanStyle(rules.Rows, row); ok {
 		return id, true
 	}

@@ -89,8 +89,8 @@ func (t *tailCapture) tail(offset int64) []byte {
 	return t.buf[offset:]
 }
 
-func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) error {
-	rules, err := prepareRules(patch)
+func transformWorksheet(src io.Reader, dst io.Writer, compiled compiledRules) error {
+	rules, err := prepareRules(compiled)
 	if err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func transformWorksheet(src io.Reader, dst io.Writer, patch compiledPatchRules) 
 					if pendingIndex < len(pending) && pending[pendingIndex].col == columnNumber {
 						setStyleAttr(&t.Attr, "s", pending[pendingIndex].styleID)
 						pendingIndex++
-					} else if style, ok := rowOrColStyle(rules.compiledPatchRules, rowNumber, columnNumber); ok {
+					} else if style, ok := rowOrColumnStyle(rules.compiledRules, rowNumber, columnNumber); ok {
 						setStyleAttr(&t.Attr, "s", style)
 					}
 				}

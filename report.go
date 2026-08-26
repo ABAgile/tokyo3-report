@@ -43,7 +43,7 @@ type worksheetState struct {
 	workbook     *excelize.File // borrowed; excelReport owns its lifecycle
 	meta         *scriptMeta
 	fieldWidths  []int
-	styleIDs     map[string]int
+	styleRules   []styleRule
 	streamStyled bool // cell styles were applied while streaming rows
 }
 
@@ -164,9 +164,9 @@ func (r *excelReport) saveWorkbook(states []worksheetState) (err error) {
 // applyWorksheetMeta rewrites worksheet XML directly, so applying styles and
 // widths does not decode the full sheet into Excelize's normal-mode structures.
 func (r *excelReport) applyWorksheetMeta(stagePath string, states []worksheetState) error {
-	rules := make(map[string]patchRules)
+	rules := make(map[string]worksheetRules)
 	for _, state := range states {
-		worksheetRules := state.worksheetPatchRules()
+		worksheetRules := state.worksheetRuleSpec()
 		if worksheetRules.empty() {
 			continue
 		}
@@ -295,7 +295,7 @@ func (s *worksheetState) populateSheet() error {
 	if err != nil {
 		return err
 	}
-	styler, err := newStreamStyler(s.workbook, s.styleIDs)
+	styler, err := newStreamStyler(s.workbook, s.styleRules)
 	if err != nil {
 		return err
 	}
@@ -437,10 +437,10 @@ func (s *worksheetState) processColumnMeta(headerIndices map[string]int) error {
 			return err
 		}
 		if width, ok := m["width"].(float64); ok {
-			s.meta.width[col] = width
+			s.meta.widths = append(s.meta.widths, widthRule{Target: col, Width: width})
 		}
 		if styleJSON, ok := m["style"].(string); ok {
-			s.meta.style[col] = styleJSON
+			s.meta.styles = append(s.meta.styles, scriptStyle{Target: col, StyleJSON: styleJSON})
 		}
 		parserName, hasParser := m["parser"].(string)
 		parser := s.Parsers[parserName]
@@ -468,38 +468,39 @@ func (s *worksheetState) processColumnMeta(headerIndices map[string]int) error {
 }
 
 // processStyleMeta parses script styles and creates workbook-wide IDs. The IDs
-// are carried into patchRules and compiled into XML rules before patching.
+// remain ordered so overlapping targets have deterministic last-rule-wins
+// behavior when the rules are compiled for either output path.
 func (s *worksheetState) processStyleMeta() error {
-	styleIDs := make(map[string]int, len(s.meta.style))
-	for target, styleJSON := range s.meta.style {
-		target = normalizeTarget(target)
+	styleRules := make([]styleRule, 0, len(s.meta.styles))
+	for _, spec := range s.meta.styles {
+		target := normalizeTarget(spec.Target)
 		var style excelize.Style
-		if err := json.Unmarshal([]byte(styleJSON), &style); err != nil {
+		if err := json.Unmarshal([]byte(spec.StyleJSON), &style); err != nil {
 			return err
 		}
 		styleID, err := s.workbook.NewStyle(&style)
 		if err != nil {
 			return err
 		}
-		styleIDs[target] = styleID
+		styleRules = append(styleRules, styleRule{Target: target, StyleID: styleID})
 	}
-	s.styleIDs = styleIDs
+	s.styleRules = styleRules
 	return nil
 }
 
-func (s *worksheetState) worksheetPatchRules() patchRules {
-	rules := patchRules{
-		Styles:      s.styleIDs,
-		FieldWidths: s.fieldWidths,
+func (s *worksheetState) worksheetRuleSpec() worksheetRules {
+	rules := worksheetRules{
+		StyleRules: s.styleRules,
+		AutoWidths: s.fieldWidths,
 	}
 	if s.streamStyled {
 		// Cell, row and range styles are already in the streamed worksheet, so
 		// only the column styles of the <cols> element are left to patch.
-		rules.Styles = columnStyles(s.styleIDs)
-		rules.SheetDataStyled = true
+		rules.StyleRules = columnStyles(s.styleRules)
+		rules.SheetDataAlreadyStyled = true
 	}
 	if s.meta != nil {
-		rules.Widths = s.meta.width
+		rules.ExplicitWidths = s.meta.widths
 	}
 	return rules
 }

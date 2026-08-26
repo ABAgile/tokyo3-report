@@ -37,10 +37,10 @@ func TestTransformWorkbookPatchesStylesAndKeepsMode(t *testing.T) {
 	}
 
 	output := filepath.Join(dir, "output.xlsx")
-	if err := transformWorkbook(source, output, map[string]patchRules{
+	if err := transformWorkbook(source, output, map[string]worksheetRules{
 		"Data": {
-			Styles: map[string]int{"1": styleID, "B2": styleID},
-			Widths: map[string]float64{"A:B": 42},
+			StyleRules:     []styleRule{{Target: "1", StyleID: styleID}, {Target: "B2", StyleID: styleID}},
+			ExplicitWidths: []widthRule{{Target: "A:B", Width: 42}},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -83,8 +83,8 @@ func TestTransformWorkbookRejectsUnknownSheet(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(dir, "output.xlsx")
-	err := transformWorkbook(source, output, map[string]patchRules{
-		"Missing": {Styles: map[string]int{"1": 1}},
+	err := transformWorkbook(source, output, map[string]worksheetRules{
+		"Missing": {StyleRules: []styleRule{{Target: "1", StyleID: 1}}},
 	})
 	if err == nil {
 		t.Fatal("expected an error for a missing worksheet")

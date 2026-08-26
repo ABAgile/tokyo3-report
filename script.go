@@ -5,13 +5,16 @@ import (
 	"go.starlark.net/syntax"
 )
 
+type scriptStyle struct {
+	Target    string
+	StyleJSON string
+}
+
 type scriptMeta struct {
-	col map[string]map[string]any
-	// parsers is a slice, not a map, so the row loop iterates it without map
-	// overhead and applies columns in a stable order.
+	col         map[string]map[string]any
 	parsers     []colParser
-	style       map[string]string
-	width       map[string]float64
+	styles      []scriptStyle
+	widths      []widthRule
 	groupFields []string
 }
 
@@ -34,9 +37,7 @@ func (m *scriptMeta) setParser(col int, fn Parser) {
 
 func (s *worksheetState) runScript() error {
 	meta := scriptMeta{
-		col:   make(map[string]map[string]any),
-		style: make(map[string]string),
-		width: make(map[string]float64),
+		col: make(map[string]map[string]any),
 	}
 
 	if s.Script != "" {
@@ -112,7 +113,7 @@ func parseStyleGlobal(globals starlark.StringDict, meta *scriptMeta) {
 		if !ok {
 			continue
 		}
-		meta.style[k] = v
+		meta.styles = append(meta.styles, scriptStyle{Target: k, StyleJSON: v})
 	}
 }
 
@@ -127,7 +128,7 @@ func parseWidthGlobal(globals starlark.StringDict, meta *scriptMeta) {
 			continue
 		}
 		if f, ok := starlark.AsFloat(item[1]); ok {
-			meta.width[k] = f
+			meta.widths = append(meta.widths, widthRule{Target: k, Width: f})
 		}
 	}
 }

@@ -20,8 +20,8 @@ type streamStyler struct {
 	values []any
 }
 
-func newStreamStyler(book *excelize.File, styleIDs map[string]int) (*streamStyler, error) {
-	compiled, err := compilePatchRules(patchRules{Styles: styleIDs})
+func newStreamStyler(book *excelize.File, styleRules []styleRule) (*streamStyler, error) {
+	compiled, err := compileRules(worksheetRules{StyleRules: styleRules})
 	if err != nil {
 		return nil, err
 	}
@@ -134,11 +134,11 @@ func (s *streamStyler) styleRow(row int, fields []any) ([]any, []excelize.RowOpt
 
 // columnStyles keeps the rules that the <cols> element carries, which is all
 // that is left to patch once cell styles are written during streaming.
-func columnStyles(styleIDs map[string]int) map[string]int {
-	cols := make(map[string]int, len(styleIDs))
-	for target, styleID := range styleIDs {
-		if styleTargetKind(target) == styleTargetCol {
-			cols[target] = styleID
+func columnStyles(styleRules []styleRule) []styleRule {
+	cols := make([]styleRule, 0, len(styleRules))
+	for _, rule := range styleRules {
+		if styleTargetKind(normalizeTarget(rule.Target)) == styleTargetCol {
+			cols = append(cols, rule)
 		}
 	}
 	return cols
